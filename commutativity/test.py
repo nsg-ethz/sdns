@@ -9,9 +9,9 @@ import datetime, time
 import functools
 import pprint
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "pox"))
-import pox.openflow.libopenflow_01 as of
-import pox.openflow.flow_table
+# sys.path.append(os.path.join(os.path.dirname(__file__), "pox"))
+# import pox.openflow.libopenflow_01 as of
+# import pox.openflow.flow_table
 
 def enum(*sequential, **named):
     enums = dict(zip(sequential, range(len(sequential))), **named)
