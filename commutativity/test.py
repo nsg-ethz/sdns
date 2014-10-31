@@ -96,22 +96,62 @@ class MainApp(object):
                                   False))
         # Mail Laurent
         testcases.append(TestCase(sw,
-                                  Command(Cmd.OF_ADD,FlowDescription('table=0, priority=8, tcp,nw_dst=10.0.0.0/8 actions=2')),
                                   Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.0.0.1')),
+                                  Command(Cmd.OF_ADD,FlowDescription('table=0, priority=8, tcp,nw_dst=10.0.0.0/8 actions=2')),
                                   [Command(Cmd.OF_ADD,FlowDescription('table=0, priority=24, tcp,nw_dst=10.0.0.0/24 actions=1'))],
                                   True))
         # Mail Laurent
         testcases.append(TestCase(sw,
-                                  Command(Cmd.OF_ADD,FlowDescription('table=0, priority=8, tcp,nw_dst=10.0.0.0/8 actions=2')),
                                   Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.0.0.1')),
+                                  Command(Cmd.OF_ADD,FlowDescription('table=0, priority=8, tcp,nw_dst=10.0.0.0/8 actions=2')),
                                   [],
                                   False))
         for tc in testcases:
             tc.evaluate()
 
-class TestSuite(object):
-    def __init__(self):
-        pass
+        predictor = CommutativityPredictor(comparator,sw)
+        for tc in testcases:
+            predictor.predict(tc)
+
+class CommutativityPredictor(object):
+    def __init__(self,comparator,switch):
+        self.comparator = comparator
+        self.switch = switch
+
+    def predict(self,testcase):
+        a = testcase.a
+        b = testcase.b
+        initial = testcase.initial
+
+        # if a.type == Cmd.TRACE and b.type == Cmd.TRACE:
+        #     return True #always commutes
+        #
+        # if a.type == Cmd.TRACE and b.type == Cmd.OF_ADD:
+        #     return None
+        #
+        # if a.type == Cmd.TRACE and b.type == Cmd.OF_DEL:
+        #     return None
+        #
+        # if a.type == Cmd.TRACE and b.type == Cmd.OF_MOD:
+        #     return None
+        #
+        # if a.type == Cmd.OF_ADD and b.type == Cmd.OF_ADD:
+        #     return None
+        #
+        # if a.type == Cmd.OF_ADD and b.type == Cmd.OF_DEL:
+        #     return None
+        #
+        # if a.type == Cmd.OF_ADD and b.type == Cmd.OF_MOD:
+        #     return None
+        #
+        # if a.type == Cmd.OF_DEL and b.type == Cmd.OF_DEL:
+        #     return None
+        #
+        # if a.type == Cmd.OF_DEL and b.type == Cmd.OF_MOD:
+        #     return None
+        #
+        # if a.type == Cmd.OF_MOD and b.type == Cmd.OF_MOD:
+        #     return None
 
 
 class TestCase(object):
