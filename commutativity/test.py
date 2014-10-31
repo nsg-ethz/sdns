@@ -13,6 +13,8 @@ import pprint
 # import pox.openflow.libopenflow_01 as of
 # import pox.openflow.flow_table
 
+
+
 def enum(*sequential, **named):
     enums = dict(zip(sequential, range(len(sequential))), **named)
     return type('Enum', (), enums)
@@ -36,7 +38,7 @@ class MainApp(object):
         env = os.environ
         # print env
         if 'OVS_SYSCONFDIR' not in env:
-            print "OVS sandbox not found."
+            print "OVS sandbox not found. See the readme for instructions."
             exit()
         sw = OvsSwitch(SwitchDesc('br0',5))
         sw.executeCommand(Command(Cmd.RESET))
@@ -44,6 +46,8 @@ class MainApp(object):
         sw2.executeCommand(Command(Cmd.RESET))
 
         comparator = FlowComparator(sw2)
+
+        #TODO: Create testcases for comparator tests
 
         print 'Overlap: ' + str(comparator.is_intersection_nonempty(
             FlowDescription('table=0, priority=1, tcp,nw_src=192.168.1.0 actions=1'),
@@ -62,6 +66,19 @@ class MainApp(object):
         print 'Subset: ' + str(comparator.is_subset(
             FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/16 actions=1'),
             FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/24 actions=2')
+        ))
+
+        print 'Overlap: ' + str(comparator.is_intersection_nonempty(
+            FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/24 actions=1'),
+            FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/16, dl_vlan=20 actions=2')
+        ))
+        print 'Subset: ' + str(comparator.is_subset(
+            FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/16, dl_vlan=20 actions=1'),
+            FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/24 actions=2')
+        ))
+        print 'Subset: ' + str(comparator.is_subset(
+            FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/24 actions=2'),
+            FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/16, dl_vlan=20 actions=1')
         ))
 
 
@@ -271,6 +288,7 @@ class FlowComparator(object):
 
     def is_subset(self,s,t):
         # is s a subset of t?
+        # TODO: this can be done much easier
         self._reset()
         s.actions = OrderedDict([('1',None)])
         t.actions = OrderedDict([('2',None)])
