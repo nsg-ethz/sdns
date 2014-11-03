@@ -15,9 +15,15 @@ import pprint
 # import pox.openflow.flow_table
 
 
-
+# see: http://stackoverflow.com/a/1695250/202504
 def enum(*sequential, **named):
     enums = dict(zip(sequential, range(len(sequential))), **named)
+    reverse = dict((value, key) for key, value in enums.iteritems())
+    key_names = reverse
+    @classmethod
+    def keys(cls):
+       return key_names
+    enums['keys'] = keys
     return type('Enum', (), enums)
 
 Cmd = enum('CREATE',
@@ -440,6 +446,9 @@ class Command(object):
         self.dump_removeStatistics = dump_removeStatistics
         self.strict = strict
 
+    def __repr__(self):
+        return ''
+
 class CommandResult(object):
     def __init__(self,type):
         self.type = type
@@ -621,8 +630,11 @@ class FlowDescription(object):
         #assert s == repr(self)
         # print repr(self)
 
-    def __repr__(self):
+    def __str__(self):
         return ', '.join([(k if v is None else k+'='+v) for k,v in self.fields.iteritems()]) + ('' if self.actions is None else ' actions='+','.join([(k if v is None else k+''+v) for k,v in self.actions.iteritems()]))
+
+    def __repr__(self):
+        return str(self.__class__.__name__) + '(\'' + str(self) + '\')'
 
     def __eq__(self, other):
         return (isinstance(other, self.__class__)
@@ -632,8 +644,10 @@ class FlowDescription(object):
         return not self.__eq__(other)
 
     def __hash__(self):
-        # TODO: find the correct way to hash an object
-        return 0;
+        # Hash a canonical representation of the flow description
+        mydict = dict(self.fields)
+        mydict['actions'] = hash(frozenset(self.actions.items()))
+        return hash(frozenset(mydict.items()))
 
 # Helper functionality
 
