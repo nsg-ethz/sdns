@@ -5,6 +5,7 @@ import subprocess
 import shlex
 import pyparsing as pp
 from collections import OrderedDict
+import itertools
 import datetime, time
 import functools
 import pprint
@@ -48,34 +49,40 @@ class MainApp(object):
         comparator = FlowComparator(sw2)
 
         testcases = []
+        # Do they overlap?
         testcases.append(IntersectionNonEmptyTestCase(comparator,
                                                       FlowDescription('table=0, priority=1, tcp,nw_src=192.168.1.0 actions=1'),
                                                       FlowDescription('table=0, priority=1, tcp,nw_src=192.168.1.1/24 actions=2'),
-                                                      None))
+                                                      True))
         testcases.append(IntersectionNonEmptyTestCase(comparator,
                                                       FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/24 actions=1'),
                                                       FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/16 actions=2'),
-                                                      None))
+                                                      True))
         testcases.append(IntersectionNonEmptyTestCase(comparator,
                                                       FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/24 actions=1'),
                                                       FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/16, dl_vlan=20 actions=2'),
-                                                      None))
+                                                      True))
+        testcases.append(IntersectionNonEmptyTestCase(comparator,
+                                                      FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/24, dl_vlan=5 actions=1'),
+                                                      FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/16, dl_vlan=20 actions=2'),
+                                                      False))
+        # Is a a subset of b?
         testcases.append(SubsetTestCase(comparator,
                                         FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/24 actions=1'),
                                         FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/16, dl_vlan=20 actions=2'),
-                                        None))
+                                        False))
         testcases.append(SubsetTestCase(comparator,
                                         FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/16, dl_vlan=20 actions=2'),
                                         FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/24 actions=1'),
-                                        None))
+                                        False))
         testcases.append(SubsetTestCase(comparator,
                                         FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/24 actions=1'),
                                         FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/16 actions=2'),
-                                        None))
+                                        True))
         testcases.append(SubsetTestCase(comparator,
                                         FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/16 actions=1'),
                                         FlowDescription('table=0, priority=1, tcp,nw_src=192.168.0.0/24 actions=2'),
-                                        None))
+                                        False))
         testcases.append(CommutativityTestCase(sw,
                                   Command(Cmd.RESET), # command A
                                   Command(Cmd.RESET), # command B
@@ -111,6 +118,33 @@ class MainApp(object):
                                   Command(Cmd.OF_ADD,FlowDescription('table=0, priority=8, tcp,nw_dst=10.0.0.0/8 actions=2')),
                                   [],
                                   False))
+        testcases.append(CommutativityTestCase(sw,
+                                  Command(Cmd.OF_ADD,FlowDescription('table=0, priority=1, tcp,nw_dst=10.0.0.0/8 actions=2')),
+                                  Command(Cmd.OF_DEL,FlowDescription('table=0, priority=1, tcp,nw_dst=10.0.0.0/8 actions=2')),
+                                  [],
+                                  False))
+        testcases.append(CommutativityTestCase(sw,
+                                  Command(Cmd.OF_ADD,FlowDescription('table=0, priority=1, tcp,nw_dst=10.0.0.0 actions=2')),
+                                  Command(Cmd.OF_DEL,FlowDescription('table=0, priority=1, tcp,nw_dst=10.0.0.0/8 actions=2')),
+                                  [],
+                                  False))
+        testcases.append(CommutativityTestCase(sw,
+                                  Command(Cmd.OF_ADD,FlowDescription('table=0, priority=1, tcp,nw_dst=10.0.0.0/8 actions=2')),
+                                  Command(Cmd.OF_DEL,FlowDescription('table=0, priority=2, tcp,nw_dst=10.0.0.0/8 actions=2')),
+                                  [],
+                                  False))
+        #priorities are not used without _STRICT
+        # testcases.append(CommutativityTestCase(sw,
+        #                           Command(Cmd.OF_ADD,FlowDescription('table=0, priority=1, tcp,nw_dst=10.0.0.0 actions=2')),
+        #                           Command(Cmd.OF_DEL,FlowDescription('table=0, priority=2, tcp,nw_dst=10.0.0.0 actions=2')),
+        #                           [],
+        #                           False))
+        # testcases.append(CommutativityTestCase(sw,
+        #                           Command(Cmd.OF_ADD,FlowDescription('table=0, priority=1, tcp,nw_dst=10.0.0.0 actions=2')),
+        #                           Command(Cmd.OF_DEL,FlowDescription('table=0, priority=2, tcp,nw_dst=10.0.0.0 actions=2'),strict=True),
+        #                           [],
+        #                           True))
+
         for tc in testcases:
             result,info_str = tc.evaluate()
             if result is True:
@@ -121,14 +155,58 @@ class MainApp(object):
                 print '????. ' + info_str
 
 
-        # predictor = CommutativityPredictor(comparator,sw)
-        # for tc in testcases:
-        #     predictor.predict(tc)
+        # command_list = [
+        #     Command(Cmd.RESET),
+        #     Command(Cmd.TRACE,FlowDescription('tcp,nw_src=192.168.1.0,nw_dst=192.168.1.1'))
+        # ]
+        # initials_list = [
+        #     []
+        # ]
+        # suite = CommutativityTestSuite(sw,comparator,command_list,initials_list)
+        # suite.evaluate_all()
+
+class CommutativityTestSuite(object):
+    """
+    Given a list of commands and a list of initial commands, generate testcases for all possible combinations
+    """
+    def __init__(self,switch,comparator,commands,initials=None):
+        self.switch = switch
+        self.comparator = comparator
+        self.commands = commands
+        if commands == None:
+            commands = []
+        self.initials = initials
+        if initials == None:
+            initials = [[]]
+        self.predictor = CommutativityPredictor(self.switch,self.comparator)
+
+    def evaluate_all(self):
+        testcases = []
+        for i in self.initials:
+            for a,b in itertools.combinations_with_replacement(self.commands,2):
+                print a
+                print b
+                current = CommutativityTestCase(self.switch,a,b,i)
+                current.expected = self.predictor.predict(current)
+        total = len(testcases)
+        passed = 0
+        failed = 0
+        print 'Generated ' + str(total) + ' testcases.'
+        for tc in testcases:
+            result,info_str = tc.evaluate()
+            if result is True:
+                print 'Pass. ' + info_str
+            elif result is False:
+                print 'Fail. ' + info_str
+            else:
+                print '????. ' + info_str
+        print 'Passed: ' + str(passed) + ', Failed: , Total ' + str(total)
+
 
 class CommutativityPredictor(object):
-    def __init__(self,comparator,switch):
-        self.comparator = comparator
+    def __init__(self,switch,comparator):
         self.switch = switch
+        self.comparator = comparator
 
     def predict(self,testcase):
         a = testcase.a
@@ -141,8 +219,14 @@ class CommutativityPredictor(object):
             x = b
             y = a
 
+        if x.type == Cmd.RESET and y.type == Cmd.RESET:
+            return True  #always commutes
+
+        if x.type == Cmd.RESET and y.type != Cmd.RESET:
+            return False
+
         if x.type == Cmd.TRACE and y.type == Cmd.TRACE:
-            return True #always commutes
+            return True
 
         if x.type == Cmd.TRACE and y.type == Cmd.OF_ADD:
             return None
@@ -170,6 +254,7 @@ class CommutativityPredictor(object):
 
         if x.type == Cmd.OF_MOD and y.type == Cmd.OF_MOD:
             return None
+        return None
 
 class IntersectionNonEmptyTestCase(object):
     def __init__(self,comparator,a,b,expected=None):
@@ -218,7 +303,7 @@ class CommutativityTestCase(object):
         self.expected = expected
 
     def execute_check_affected(self,cmd):
-        if not cmd == Cmd.TRACE:
+        if cmd != Cmd.TRACE:
             # we will not get information about the affected rules in the result
             before = self.switch.executeCommand(Command(Cmd.DUMP,dump_removeStatistics=True))
             result = self.switch.executeCommand(cmd)
@@ -284,7 +369,7 @@ class CommutativityTestCase(object):
         second_set = set(second_dump.dumped_flows)
         if not first_set == second_set:
             commutes = False
-            print "Flow tables not the same"
+            # print "Flow tables not the same"
             # print "In first but not second:"
             # print list(first_set.difference(second_set))
             # print "In second but not first:"
