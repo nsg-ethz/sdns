@@ -155,15 +155,15 @@ class MainApp(object):
                 print '????. ' + info_str
 
 
-        # command_list = [
-        #     Command(Cmd.RESET),
-        #     Command(Cmd.TRACE,FlowDescription('tcp,nw_src=192.168.1.0,nw_dst=192.168.1.1'))
-        # ]
-        # initials_list = [
-        #     []
-        # ]
-        # suite = CommutativityTestSuite(sw,comparator,command_list,initials_list)
-        # suite.evaluate_all()
+        command_list = [
+            Command(Cmd.RESET),
+            Command(Cmd.TRACE,FlowDescription('tcp,nw_src=192.168.1.0,nw_dst=192.168.1.1'))
+        ]
+        initials_list = [
+            []
+        ]
+        suite = CommutativityTestSuite(sw,comparator,command_list,initials_list)
+        suite.evaluate_all()
 
 class CommutativityTestSuite(object):
     """
@@ -184,10 +184,9 @@ class CommutativityTestSuite(object):
         testcases = []
         for i in self.initials:
             for a,b in itertools.combinations_with_replacement(self.commands,2):
-                print a
-                print b
                 current = CommutativityTestCase(self.switch,a,b,i)
                 current.expected = self.predictor.predict(current)
+                testcases.append(current)
         total = len(testcases)
         passed = 0
         failed = 0
@@ -200,7 +199,7 @@ class CommutativityTestSuite(object):
                 print 'Fail. ' + info_str
             else:
                 print '????. ' + info_str
-        print 'Passed: ' + str(passed) + ', Failed: , Total ' + str(total)
+        print 'Passed: ' + str(passed) + ', Failed: ' + str(failed) + ', Total ' + str(total)
 
 
 class CommutativityPredictor(object):
