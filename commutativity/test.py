@@ -203,8 +203,10 @@ class CommutativityTestSuite(object):
                 print 'Pass. ' + info_str
             elif result is False:
                 print 'Fail. ' + info_str
+                print tc
             else:
                 print '????. ' + info_str
+                print tc
         print 'Passed: ' + str(passed) + ', Failed: ' + str(failed) + ', Total ' + str(total)
 
 
@@ -393,6 +395,9 @@ class CommutativityTestCase(object):
         else:
             return (None,info_str)
 
+    def __str__(self):
+        return '(' + str(self.a) + ', ' + str(self.b) + ', initial=' + str(self.initial) + ', expected=' + str(self.expected) + ')'
+
 class FlowComparator(object):
     def __init__(self,switch):
         self.switch = switch
@@ -439,6 +444,9 @@ class SwitchDesc(object):
         self.name = name
         self.ports = ports
 
+    def __str__(self):
+        return name
+
 class Command(object):
     def __init__(self,type,flowdesc=None,strict=False, dump_removeStatistics=False):
         self.type = type
@@ -446,8 +454,8 @@ class Command(object):
         self.dump_removeStatistics = dump_removeStatistics
         self.strict = strict
 
-    def __repr__(self):
-        return ''
+    def __str__(self):
+        return '[' + str(Cmd.keys()[self.type]) + ', ' + str(self.flowdesc) + ((', strict=' + str(self.strict)) if self.strict else '') + ((', dump_removeStatistics=' + str(self.dump_removeStatistics)) if self.dump_removeStatistics else '') + ']'
 
 class CommandResult(object):
     def __init__(self,type):
