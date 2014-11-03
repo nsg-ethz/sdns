@@ -196,18 +196,22 @@ class CommutativityTestSuite(object):
         total = len(testcases)
         passed = 0
         failed = 0
+        na = 0
         print 'Generated ' + str(total) + ' testcases.'
         for tc in testcases:
             result,info_str = tc.evaluate()
             if result is True:
+                passed += 1
                 print 'Pass. ' + info_str
             elif result is False:
+                failed += 1
                 print 'Fail. ' + info_str
-                print tc
+                print str(tc)
             else:
+                na += 1
                 print '????. ' + info_str
-                print tc
-        print 'Passed: ' + str(passed) + ', Failed: ' + str(failed) + ', Total ' + str(total)
+                print str(tc)
+        print 'Passed: ' + str(passed) + ', Failed: ' + str(failed) + ', n/a: ' + str(na) + ', Total ' + str(total)
 
 
 class CommutativityPredictor(object):
@@ -226,41 +230,60 @@ class CommutativityPredictor(object):
             x = b
             y = a
 
-        if x.type == Cmd.RESET and y.type == Cmd.RESET:
-            return True  #always commutes
 
-        if x.type == Cmd.RESET and y.type != Cmd.RESET:
-            return False
+        #
+        # TODO: transfer rules from the document to here
+        #
 
-        if x.type == Cmd.TRACE and y.type == Cmd.TRACE:
-            return True
+        if x.type == Cmd.RESET:
+            if y.type == Cmd.RESET:
+                return True  #always commutes
 
-        if x.type == Cmd.TRACE and y.type == Cmd.OF_ADD:
-            return None
+            if y.type == Cmd.TRACE:
+                return None # depends on whether or not the TRACE matches any rule at all
 
-        if x.type == Cmd.TRACE and y.type == Cmd.OF_DEL:
-            return None
+            if y.type == Cmd.OF_ADD:
+                return False
 
-        if x.type == Cmd.TRACE and y.type == Cmd.OF_MOD:
-            return None
+            if y.type == Cmd.OF_DEL:
+                return None # depends: if everything or nothing was deleted, then it commutes
 
-        if x.type == Cmd.OF_ADD and y.type == Cmd.OF_ADD:
-            return None
+            if y.type == Cmd.OF_MOD:
+                return None # depends: if nothing was modified, then it commutes
 
-        if x.type == Cmd.OF_ADD and y.type == Cmd.OF_DEL:
-            return None
+        if x.type == Cmd.TRACE:
+            if y.type == Cmd.TRACE:
+                return True #always commutes
 
-        if x.type == Cmd.OF_ADD and y.type == Cmd.OF_MOD:
-            return None
+            if y.type == Cmd.OF_ADD:
+                return None
 
-        if x.type == Cmd.OF_DEL and y.type == Cmd.OF_DEL:
-            return None
+            if y.type == Cmd.OF_DEL:
+                return None
 
-        if x.type == Cmd.OF_DEL and y.type == Cmd.OF_MOD:
-            return None
+            if y.type == Cmd.OF_MOD:
+                return None
 
-        if x.type == Cmd.OF_MOD and y.type == Cmd.OF_MOD:
-            return None
+        if x.type == Cmd.OF_ADD:
+            if y.type == Cmd.OF_ADD:
+                return None
+
+            if y.type == Cmd.OF_DEL:
+                return None
+
+            if y.type == Cmd.OF_MOD:
+                return None
+
+        if x.type == Cmd.OF_DEL:
+            if y.type == Cmd.OF_DEL:
+                return None
+
+            if y.type == Cmd.OF_MOD:
+                return None
+
+        if x.type == Cmd.OF_MOD:
+            if y.type == Cmd.OF_MOD:
+                return None
         return None
 
 class IntersectionNonEmptyTestCase(object):
@@ -396,7 +419,7 @@ class CommutativityTestCase(object):
             return (None,info_str)
 
     def __str__(self):
-        return '(' + str(self.a) + ', ' + str(self.b) + ', initial=' + str(self.initial) + ', expected=' + str(self.expected) + ')'
+        return '(\n\t' + str(self.a) + ',\n\t' + str(self.b) + ',\n\tinitial=' + str(self.initial) + ',\n\texpected=' + str(self.expected) + '\n)'
 
 class FlowComparator(object):
     def __init__(self,switch):
