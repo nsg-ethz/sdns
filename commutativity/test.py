@@ -134,16 +134,16 @@ class MainApp(object):
                                   [],
                                   False))
         #priorities are not used without _STRICT
-        # testcases.append(CommutativityTestCase(sw,
-        #                           Command(Cmd.OF_ADD,FlowDescription('table=0, priority=1, tcp,nw_dst=10.0.0.0 actions=2')),
-        #                           Command(Cmd.OF_DEL,FlowDescription('table=0, priority=2, tcp,nw_dst=10.0.0.0 actions=2')),
-        #                           [],
-        #                           False))
-        # testcases.append(CommutativityTestCase(sw,
-        #                           Command(Cmd.OF_ADD,FlowDescription('table=0, priority=1, tcp,nw_dst=10.0.0.0 actions=2')),
-        #                           Command(Cmd.OF_DEL,FlowDescription('table=0, priority=2, tcp,nw_dst=10.0.0.0 actions=2'),strict=True),
-        #                           [],
-        #                           True))
+        testcases.append(CommutativityTestCase(sw,
+                                  Command(Cmd.OF_ADD,FlowDescription('table=0, priority=1, tcp,nw_dst=10.0.0.0 actions=2')),
+                                  Command(Cmd.OF_DEL,FlowDescription('table=0, priority=2, tcp,nw_dst=10.0.0.0 actions=2')),
+                                  [],
+                                  False))
+        testcases.append(CommutativityTestCase(sw,
+                                  Command(Cmd.OF_ADD,FlowDescription('table=0, priority=1, tcp,nw_dst=10.0.0.0 actions=2')),
+                                  Command(Cmd.OF_DEL,FlowDescription('table=0, priority=2, tcp,nw_dst=10.0.0.0'),strict=True),
+                                  [],
+                                  True))
 
         for tc in testcases:
             result,info_str = tc.evaluate()
@@ -313,10 +313,10 @@ class CommutativityTestCase(object):
             before_set = set(before.dumped_flows)
             after_set = set(after.dumped_flows)
 
-            # s.difference_update(t): return set s after removing elements found in t
-            diff = before_set.difference_update(after_set)
-            if diff is not None:
-                result.affected_flows = list(diff)
+            result.removed = before_set.difference(after_set)
+            result.added = after_set.difference(before_set)
+            result.affected_flows = before_set.symmetric_difference(after_set)
+
             return result
         else:
             return self.switch.executeCommand(cmd)
@@ -376,7 +376,10 @@ class CommutativityTestCase(object):
             # print list(second_set.difference(first_set))
 
         # print "Done with testcase"
-        info_str = ('commutes.' if commutes else 'does not commute.') + ' Affected # of rules: (' + str(len(first_a.affected_flows))+';'+str(len(second_a.affected_flows))+'), ('+str(len(first_b.affected_flows))+';'+str(len(second_b.affected_flows))+')'
+        info_str = ('commutes.' if commutes else 'does not commute.') + ' Rules added/removed: ' \
+        '(' + '+'+str(len(first_a.added))+'/-'+str(len(first_a.removed))+', '+'+'+str(len(first_b.added))+'/-'+str(len(first_b.removed))+')' + ' vs.' \
+        '(' + '+'+str(len(second_a.added))+'/-'+str(len(second_a.removed))+', '+'+'+str(len(second_b.added))+'/-'+str(len(second_b.removed))+')'
+
         if self.expected is not None:
             if commutes == self.expected:
                 return (True,info_str)
@@ -535,12 +538,12 @@ class OvsSwitch(object):
         return result
 
     def _of_del(self,cmd):
+        f = FlowDescription(str(cmd.flowdesc))
+        f.actions = None
         if cmd.strict:
             run_cmdline_string('ovs-ofctl --strict del-flows '+self.switchdesc.name+' "'+str(cmd.flowdesc)+'"')
         else:
-            f = FlowDescription(str(cmd.flowdesc))
             del f.fields['priority']
-            f.actions = None
             run_cmdline_string('ovs-ofctl del-flows '+self.switchdesc.name+' "'+str(f)+'"')
         return CommandResult(cmd.type)
 
