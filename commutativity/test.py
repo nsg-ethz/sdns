@@ -217,7 +217,7 @@ class CommutativityTestSuite(object):
         soft_fails = 0
         failed = 0
         na = 0
-        print 'Running a total of %s testcases out of ' % str(total)
+        print 'Running a total of {0} testcases'.format(total)
         for i in self.initials:
             for a,b in itertools.combinations_with_replacement(self.commands,2):
                 # (n+r-1)! / r! / (n-1)!, with r=2
@@ -237,11 +237,11 @@ class CommutativityTestSuite(object):
                     if tc.expected == False:
                         # it commuted although we did not expect it to
                         soft_fails += 1
-                        print str(caseno) + '/' +str(total) + ': Soft Fail. ' + info_str
-#                         print str(tc)
+                        print str(caseno) + '/' +str(total) + ': Soft Fail (impreciseness) ' + info_str
+                        print str(tc)
                     else:
                         hard_fails += 1
-                        print str(caseno) + '/' +str(total) + ': Hard Fail. ' + info_str
+                        print str(caseno) + '/' +str(total) + ': Hard Fail (unsoundness). ' + info_str
                         print str(tc)
                 else:
                     na += 1
@@ -312,8 +312,6 @@ class CommutativityPredictor(object):
             r.update_return_value(self.comparator)
             
 
-
-            
         # Determining the rules:
         # - Use the actual return values to see which flows were actually touched
         # - Compare this with the "other" command to see if:
@@ -754,7 +752,8 @@ class CommutativityTestCase(object):
             return (None,info_str)
 
     def __str__(self):
-        return '(\n\t' + str(self.a) + ',\n\t' + str(self.b) + ',\n\tinitial=' + str(self.initial) + ',\n\texpected=' + str(self.expected) + '\n)'
+        initial_str = ', '.join([str(i) for i in self.initial])
+        return '(\n\t' + str(self.a) + ',\n\t' + str(self.b) + ',\n\tinitial=' + initial_str + ',\n\texpected=' + str(self.expected) + '\n)'
 
 class FlowComparator(object):
     def __init__(self,switch):
