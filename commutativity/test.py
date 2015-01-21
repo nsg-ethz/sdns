@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import sys
 import os
+import re
 import subprocess
 import shlex
 import pyparsing as pp
@@ -167,6 +168,12 @@ class MainApp(object):
 
 
         # Autogenerate testcases by trying all combinations
+        #
+        # Notes:
+        # - Always use 'output:x' instad of just 'x' in action lists.
+        # - For IP addresses: Always use canonical representations, i.e. use 10.0.0.0/8 instead of 10.0.1.0/8
+        #   -> Check e.g. here if necessary: http://jodies.de/ipcalc
+        #
 
         command_list = [
             Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.0.0.0')),
@@ -175,19 +182,21 @@ class MainApp(object):
             Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.0.2.0')),
             Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.1.0.0')),
             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=0 actions=drop')),
-            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.1 actions=1')),
-            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/24 actions=2')),
-            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/8 actions=3')),
-            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.1.0/8 actions=4')),
-            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.2.0/8 actions=5')),
-            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.1.0.0/16 actions=6')),
-            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/16 actions=7')),
+            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.1 actions=output:1')),
+#             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,in_port=ANY,vlan_tci=0x0000,dl_src=00:00:00:00:00:00,dl_dst=00:00:00:00:00:00,nw_src=0.0.0.0,nw_dst=10.0.0.1,nw_tos=0,nw_ecn=0,nw_ttl=0,tp_src=0,tp_dst=0,tcp_flags=0, actions=output:1')),
+            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/8 actions=output:2')),
+            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/24 actions=output:3')),
+            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.1.0/24 actions=output:4')),
+            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.2.0/24 actions=output:5')),
+            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.1.0.0/16 actions=output:6')),
+            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/16 actions=output:7')),
         ]
         initials_list = [
             [Command(Cmd.OF_ADD,FlowDescription('table=0, priority=0, tcp, actions=drop'))],
             [Command(Cmd.OF_ADD,FlowDescription('table=0, priority=0, tcp, actions=drop')),Command(Cmd.OF_ADD,FlowDescription('table=0, priority=10, tcp actions=drop'))],
-            [Command(Cmd.OF_ADD,FlowDescription('table=0, priority=0, tcp, actions=drop')),Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/24 actions=8'))],
-            [Command(Cmd.OF_ADD,FlowDescription('table=0, priority=0, tcp, actions=drop')),Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.1 actions=9'))],
+            [Command(Cmd.OF_ADD,FlowDescription('table=0, priority=10, tcp, actions=drop'))],
+            [Command(Cmd.OF_ADD,FlowDescription('table=0, priority=0, tcp, actions=drop')),Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/24 actions=output:8'))],
+            [Command(Cmd.OF_ADD,FlowDescription('table=0, priority=0, tcp, actions=drop')),Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.1 actions=output:9'))],
         ]
         suite = CommutativityTestSuite(sw,comparator,command_list,initials_list)
         suite.evaluate_all()
@@ -213,42 +222,45 @@ class CommutativityTestSuite(object):
         total = len(self.commands)*(len(self.commands)+1)/2*len(self.initials)
         caseno = 0
         passed = 0
-        hard_fails = 0
-        soft_fails = 0
+        failed_imprecise = 0
+        failed_unsound = 0
         failed = 0
         na = 0
+        debug_cases = None #[22] # TODO JM: Debug code, remove
         print 'Running a total of {0} testcases'.format(total)
         for i in self.initials:
             for a,b in itertools.combinations_with_replacement(self.commands,2):
                 # (n+r-1)! / r! / (n-1)!, with r=2
                 # (n+1)! / 2 / (n-1)! = 1/2 * n(n+1)
-                tc = CommutativityTestCase(self.switch,a,b,i)
-                testcases.append(tc)
-                tc.expected = self.predictor.predict(tc)
                 caseno += 1
-                result,info_str = tc.evaluate()
-                tc.result = result
-                tc.info_str = info_str
-                if result is True:
-                    passed += 1
-                    print str(caseno) + '/' +str(total) + ': Pass. ' + info_str
-                elif result is False:
-                    failed += 1
-                    if tc.expected == False:
-                        # it commuted although we did not expect it to
-                        soft_fails += 1
-                        print str(caseno) + '/' +str(total) + ': Soft Fail (impreciseness) ' + info_str
-                        print str(tc)
+                if debug_cases is None or caseno in debug_cases: # TODO JM: Debug code, remove
+                    print str(caseno) + '/' +str(total) + ':',
+                    tc = CommutativityTestCase(self.switch,a,b,i)
+                    testcases.append(tc)
+                    tc.expected = self.predictor.predict(tc)
+                    result,info_str = tc.evaluate()
+                    tc.result = result
+                    tc.info_str = info_str
+                    if result is True:
+                        passed += 1
+                        print 'Pass. ' + info_str
+                    elif result is False:
+                        failed += 1
+                        if tc.expected == False:
+                            # it commuted although we did not expect it to
+                            failed_imprecise += 1
+                            print 'Fail (impreciseness). ' + info_str
+                            print str(tc)
+                        else:
+                            failed_unsound += 1
+                            print 'Fail (unsoundness). ' + info_str
+                            print str(tc)
                     else:
-                        hard_fails += 1
-                        print str(caseno) + '/' +str(total) + ': Hard Fail (unsoundness). ' + info_str
-                        print str(tc)
-                else:
-                    na += 1
-#                     print str(caseno) + '/' +str(total) + ': ____. ' + info_str
-#                     print str(tc)
-        print 'Passed: {0}, Failed: {1} (soft: {2}, hard: {3}), n/a: {4} , Total: {5}'.format(passed,failed,soft_fails,hard_fails,na,total)
-        assert total == len(testcases)
+                        na += 1
+                        print 'N/A. ' + info_str
+#                         print str(tc)
+        print 'Passed: {0}, Failed: {1} (imprecise: {2}, unsound: {3}), n/a: {4} , Total: {5}'.format(passed,failed,failed_imprecise,failed_unsound,na,total)
+        assert total == len(testcases) 
 
 
 class CommutativityPredictor(object):
@@ -503,18 +515,23 @@ class CommutativityPredictor(object):
                 # Considering statistics, no return value for add() needed:
                 # -  Rt != (pa,ka,aa) and (pa < Rt.p or kt not in ka)
                 
-                # x trace
-                # y add
+                # Rewritten:
+                # Does NOT commute if:
+                # (Rt == (pa,ka,aa) or (pa >= Rt.p and kt in ka)) and select(Rt.k,Ra).a != Rt.a
+               
                 
-                kt = x.flowdesc.get_match()
+                # x is TRACE
+                # y is ADD
+                
+                kt = x.flowdesc.get_match() # TRACE key
                 
                 pa_ka_aa = y.flowdesc
-                pa = pa_ka_aa.get_priority()
-                ka = pa_ka_aa.get_match()
-                aa = pa_ka_aa.get_actions()
+                pa = pa_ka_aa.get_priority() # ADD prio
+                ka = pa_ka_aa.get_match() # ADD key
+                aa = pa_ka_aa.get_actions() # ADD action
                 
-                Rt1 = xy_x.retval
-                Rt2 = yx_x.retval
+                Rt1 = xy_x.retval # Which rule did the TRACE use (case 1: ADD was not yet executed)
+                Rt2 = yx_x.retval # Which rule did the TRACE use (case 2: ADD was already executed)
                 Rt1a = Rt1.get_actions()
                 Rt2a = Rt2.get_actions()
                 Rt1p = Rt1.get_priority()
@@ -522,19 +539,53 @@ class CommutativityPredictor(object):
                 Rt1k = Rt1.get_match()
                 Rt2k = Rt2.get_match()
                 
-                R1a = xy_y.retval
-                R2a = yx_y.retval
+                Ra1 = xy_y.retval # Which rules did ADD override/hide that were previously there? (case 1)
+                Ra2 = yx_y.retval # Which rules did ADD override/hide that were previously there? (case 2)
                 
-                s = self.comparator.is_subset(kt,ka)
-                t1 = self.comparator.select(kt,R1a)
-                t2 = self.comparator.select(kt,R2a)
-                u1 = t1.get_actions()
-                u2 = t2.get_actions()
-                xy_commutes = (Rt1 != pa_ka_aa) and (pa < Rt1p or not s) or u1 == Rt1a
-                yx_commutes = (Rt2 != pa_ka_aa) and (pa < Rt2p or not s) or u2 == Rt2a
+                s = self.comparator.is_subset(kt,ka) # is the TRACE key a subset of the ADD key? 
+                t1 = self.comparator.select(kt,Ra1) # which rule would TRACE use from the overridden/hidden rules (case 1)
+                t2 = self.comparator.select(kt,Ra2) # which rule would TRACE use from the overridden/hidden rules (case 2)
+                u1 = t1.get_actions() # what would the corresponding action be (case 1)
+                u2 = t2.get_actions() # what would the corresponding action be (case 2)
                 
-                assert xy_commutes == yx_commutes
-                return xy_commutes
+                
+                # Case 1: TRACE->ADD. At the time of the check, TRACE was already executed but ADD not.
+                xy_conflicts = ((Rt1 == pa_ka_aa) or (pa >= Rt1p and s)) and u1 != Rt1a
+                
+                #               the TRACE chose the ADD exactly
+                #                                     the TRACE chose some other rule, but it would also match
+                #                                     the ADD, and the ADD has higher priority
+                #                                                            out of all the rules the ADD replaced
+                
+                # Case 2; ADD->TRACE. At the time of the check, ADD was already executed but TRACE was not.
+                yx_conflicts = ((Rt2 == pa_ka_aa) or (pa >= Rt2p and s)) and u2 != Rt2a
+                
+                
+                
+                #
+                # General pattern:
+                # - Determine conflicts for both orders A->B and B->A
+                #   - In each those orders determine conflict for both commands:
+                #     - Here, ADD never conflicts
+                #     - TRACE may conflict
+                #
+                # - Combine formulas with ORs. Here this results in 2 clauses, in the general case we will get 4.
+                #
+                
+                # TRACE -> ADD
+                xy_conflicts = (s and pa >= Rt1p and aa != Rt1a)
+                # ADD -> TRACE
+                yx_conflicts = (Rt2 == pa_ka_aa and u2 != Rt2a)
+                
+                xy_conflicts = (s and pa >= Rt1p and aa != Rt1a) or (Rt1 == pa_ka_aa and u1 != Rt1a)
+                yx_conflicts = (s and pa >= Rt2p and aa != Rt2a) or (Rt2 == pa_ka_aa and u2 != Rt2a)
+                
+                
+                
+                # To be a valid specification, the rule has to produce the same output for each case. In reality,
+                # only one of the cases will be available for checking.
+                assert xy_conflicts == yx_conflicts
+                return not xy_conflicts
         
             if y.type == Cmd.OF_DEL:
                 if y.strict:
@@ -548,77 +599,77 @@ class CommutativityPredictor(object):
                 else:
                     return None
         
-        if x.type == Cmd.OF_ADD:
-            if x.strict:
-                if y.type == Cmd.OF_ADD:
-                    return None
-        
-                if y.type == Cmd.OF_DEL:
-                    if y.strict:
-                        return None
-                    else:
-                        return None
-        
-                if y.type == Cmd.OF_MOD:
-                    if y.strict:
-                        return None
-                    else:
-                        return None
-            else:
-                if y.type == Cmd.OF_ADD:
-                    return None
-        
-                if y.type == Cmd.OF_DEL:
-                    if y.strict:
-                        return None
-                    else:
-                        return None
-        
-                if y.type == Cmd.OF_MOD:
-                    if y.strict:
-                        return None
-                    else:
-                        return None
-        
-        if x.type == Cmd.OF_DEL:
-            if x.strict:
-                if y.type == Cmd.OF_DEL:
-                    if y.strict:
-                        return None
-                    else:
-                        return None
-        
-                if y.type == Cmd.OF_MOD:
-                    if y.strict:
-                        return None
-                    else:
-                        return None
-            else:
-                if y.type == Cmd.OF_DEL:
-                    if y.strict:
-                        return None
-                    else:
-                        return None
-        
-                if y.type == Cmd.OF_MOD:
-                    if y.strict:
-                        return None
-                    else:
-                        return None
-        
-        if x.type == Cmd.OF_MOD:
-            if x.strict:
-                if y.type == Cmd.OF_MOD:
-                    if y.strict:
-                        return None
-                    else:
-                        return None
-            else:
-                if y.type == Cmd.OF_MOD:
-                    if y.strict:
-                        return None
-                    else:
-                        return None
+#         if x.type == Cmd.OF_ADD:
+#             if x.strict:
+#                 if y.type == Cmd.OF_ADD:
+#                     return None
+#         
+#                 if y.type == Cmd.OF_DEL:
+#                     if y.strict:
+#                         return None
+#                     else:
+#                         return None
+#         
+#                 if y.type == Cmd.OF_MOD:
+#                     if y.strict:
+#                         return None
+#                     else:
+#                         return None
+#             else:
+#                 if y.type == Cmd.OF_ADD:
+#                     return None
+#         
+#                 if y.type == Cmd.OF_DEL:
+#                     if y.strict:
+#                         return None
+#                     else:
+#                         return None
+#         
+#                 if y.type == Cmd.OF_MOD:
+#                     if y.strict:
+#                         return None
+#                     else:
+#                         return None
+#         
+#         if x.type == Cmd.OF_DEL:
+#             if x.strict:
+#                 if y.type == Cmd.OF_DEL:
+#                     if y.strict:
+#                         return None
+#                     else:
+#                         return None
+#         
+#                 if y.type == Cmd.OF_MOD:
+#                     if y.strict:
+#                         return None
+#                     else:
+#                         return None
+#             else:
+#                 if y.type == Cmd.OF_DEL:
+#                     if y.strict:
+#                         return None
+#                     else:
+#                         return None
+#         
+#                 if y.type == Cmd.OF_MOD:
+#                     if y.strict:
+#                         return None
+#                     else:
+#                         return None
+#         
+#         if x.type == Cmd.OF_MOD:
+#             if x.strict:
+#                 if y.type == Cmd.OF_MOD:
+#                     if y.strict:
+#                         return None
+#                     else:
+#                         return None
+#             else:
+#                 if y.type == Cmd.OF_MOD:
+#                     if y.strict:
+#                         return None
+#                     else:
+#                         return None
 
 class IntersectionNonEmptyTestCase(object):
     def __init__(self,comparator,a,b,expected=None):
@@ -764,8 +815,9 @@ class FlowComparator(object):
 
     def select(self,s,table):
         """Match a flow s to the single closest flow entry in a flow table. 
-        Note that the exact matching is implementation dependent in case there
-        are multiple closest entries.
+        Note that in case there are overlapping entries, this will fail with
+        an assertion failure. In a real switch, the behaviour would be implementation
+        dependent.
         :type s: FlowDescription
         :type t: list[FlowDescription]
         :rtype: FlowDescription
@@ -843,13 +895,15 @@ class FlowComparator(object):
         # is s a subset of t?
         # TODO: this can be done much faster (without simulation)
         # Note: Priorities are NOT checked here!
+        s_copy = s.copy()
+        t_copy = t.copy()
         self._reset()
-        s.actions = OrderedDict([('1',None)])
-        t.actions = OrderedDict([('2',None)])
-        result_t = self.switch.executeCommand(Command(Cmd.OF_ADD,t))
-        result_s = self.switch.executeCommand(Command(Cmd.OF_ADD,s))
+        s_copy.actions = OrderedDict([('1',None)])
+        t_copy.actions = OrderedDict([('2',None)])
+        result_t = self.switch.executeCommand(Command(Cmd.OF_ADD,t_copy))
+        result_s = self.switch.executeCommand(Command(Cmd.OF_ADD,s_copy))
         before = self.switch.executeCommand(Command(Cmd.DUMP,dump_removeStatistics=True))
-        result = self.switch.executeCommand(Command(Cmd.OF_DEL,t))
+        result = self.switch.executeCommand(Command(Cmd.OF_DEL,t_copy))
         after = self.switch.executeCommand(Command(Cmd.DUMP,dump_removeStatistics=True))
         before_num = len(before.dumped_flows)
         after_num = len(after.dumped_flows)
@@ -941,18 +995,28 @@ class CommandResult(object):
         # Return the traced rule. NOTE: The rare case of multiple equally matching rules is ignored.
         result = FlowDescription(self.traced_rule)
         result.set_actions(self.traced_actions)
+        result.remove_statistics()
         return result
     def _retval_dump(self,comparator):
         # Return all rules
         return self.before_set
     def _retval_of_add(self,comparator):
         ': :type comparator: FlowComparator'
-        # Return all rules in the flow table that are a superset of s.
+        # Return all rules in the flow table that are a superset of s, if none of
+        # them have higher priority than s. (If any of them had higher priority,
+        # then the added rule would not make any kind of difference.
         s = FlowDescription(str(self.cmd.flowdesc))
+        s_prio = s.get_priority()
         s.remove_statistics()
         s.remove_priority()
         s.remove_actions()
-        return comparator.superset_set(s, self.before_set)
+        superset_flows = comparator.superset_set(s, self.before_set)
+        for t in superset_flows:
+            t_prio = t.get_priority()
+            if t_prio > s_prio:
+                return set() # empty set
+        return superset_flows
+
     def _retval_of_del(self,comparator):
         # Return all rules that were removed by the deletion.
         return self.removed_flows
@@ -1042,8 +1106,8 @@ class OvsSwitch(object):
         for l in lines:
             if rule is None and l.startswith("Rule: "):
                 rule = l[6:]
-            if actions is None and l.startswith("Datapath actions: "):
-                actions = l[18:]
+            if actions is None and l.startswith("OpenFlow actions="):
+                actions = l[17:]
         result.traced_rule = rule
         result.traced_actions = actions
         return result
@@ -1078,6 +1142,8 @@ class OvsSwitch(object):
             l = lines[0].strip()
             if l.startswith('OFPT_ERROR') and l.endswith('OFPFMFC_OVERLAP'):
                 result.overlap_error = True
+            if l.find('must specify an action') != -1:
+                raise Exception(lines)
         return result
 
     def _of_del(self,cmd):
@@ -1141,7 +1207,7 @@ class FlowDescription(object):
         flowdesc_parser = fields("fields")
 
         parsed = flowdesc_parser.parseString(s)
-        # print parsed.dump()
+#         print parsed.dump()
 
         # Store
         self.fields = OrderedDict([(i[0],(None if len(i) < 2 else i[1])) for i in parsed.fields.asList()])
@@ -1179,13 +1245,15 @@ class FlowDescription(object):
         if 'priority' in self.fields:
             integer = pp.Word(pp.nums)
             priority = integer
-            
+             
             def _parse_priority(s,loc,tok):
+                # Note: effectively the same as using return int(self.fields['priority']), but ignores whitespace
                 assert len(tok) == 1
-                return int(tok[0])
-
+                return int(tok[0]) # unpack
+ 
             priority.setParseAction(_parse_priority)
-            parsed = priority.parseString(self.fields['priority'])
+            flowdesc_parser = priority("priority")
+            parsed = flowdesc_parser.parseString(self.fields['priority'])
             return parsed.priority
         else:
             return None
@@ -1208,7 +1276,11 @@ class FlowDescription(object):
                     return datetime.timedelta(seconds=int(tok[0]))
 
             duration.setParseAction(_parse_duration)
-            parsed = duration.parseString(self.fields['duration'])
+            flowdesc_parser = duration("duration")
+            parsed = flowdesc_parser.parseString(self.fields['duration'])
+            print parsed.dump()
+            dd = parsed.duration
+            print dd
             return parsed.duration
         else:
             return None
@@ -1223,7 +1295,7 @@ class FlowDescription(object):
         """Get a copy of this FlowDescription with stats, priority, actions removed.
         :rtype: FlowDescription
         """
-        result = FlowDescription(self.__str__())
+        result = self.copy()
         result.remove_statistics()
         result.remove_priority()
         result.remove_actions()
@@ -1283,6 +1355,9 @@ class FlowDescription(object):
         mydict = dict(self.fields)
         mydict['actions'] = hash(frozenset(self.actions.items()))
         return hash(frozenset(mydict.items()))
+    
+    def copy(self):
+        return FlowDescription(self.__str__())
 
 # Helper functionality
 
