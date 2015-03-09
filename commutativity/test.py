@@ -10,13 +10,16 @@ import itertools
 import datetime, time
 import functools
 import pprint
-from email.utils import COMMASPACE
 
 # sys.path.append(os.path.join(os.path.dirname(__file__), "pox"))
 # import pox.openflow.libopenflow_01 as of
 # import pox.openflow.flow_table
 
 # For type hints/annotations see: http://pydev.org/manual_adv_type_hints.html
+
+#
+# TODO JM: Add support for out_port matching for DELETE and DELETE_STRICT?
+#
 
 # This enum adapted from: http://stackoverflow.com/a/1695250/202504
 def enum(*sequential, **named):
@@ -27,6 +30,10 @@ def enum(*sequential, **named):
     def keys(cls):
        return key_names
     enums['keys'] = keys
+    @classmethod
+    def values(cls):
+       return enums
+    enums['values'] = values
     return type('Enum', (), enums)
 
 Cmd = enum('CREATE',
@@ -170,26 +177,27 @@ class MainApp(object):
         # Autogenerate testcases by trying all combinations
         #
         # Notes:
-        # - Always use 'output:x' instad of just 'x' in action lists.
+        # - Always use 'output:x' instead of just 'x' in action lists.
         # - For IP addresses: Always use canonical representations, i.e. use 10.0.0.0/8 instead of 10.0.1.0/8
-        #   -> Check e.g. here if necessary: http://jodies.de/ipcalc
+        #   -> Check using ipcalc if necessary, e.g.: $ ipcalc 10.0.1.0/8 | grep Network
         #
 
         command_list = [
             Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.0.0.0')),
             Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.0.0.1')),
             Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.0.1.0')),
-            Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.0.2.0')),
-            Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.1.0.0')),
+#             Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.0.2.0')),
+#             Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.1.0.0')),
             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=0 actions=drop')),
             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.1 actions=output:1')),
-#             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,in_port=ANY,vlan_tci=0x0000,dl_src=00:00:00:00:00:00,dl_dst=00:00:00:00:00:00,nw_src=0.0.0.0,nw_dst=10.0.0.1,nw_tos=0,nw_ecn=0,nw_ttl=0,tp_src=0,tp_dst=0,tcp_flags=0, actions=output:1')),
-            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/8 actions=output:2')),
+#             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/8 actions=output:2')),
             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/24 actions=output:3')),
-            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.1.0/24 actions=output:4')),
-            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.2.0/24 actions=output:5')),
-            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.1.0.0/16 actions=output:6')),
-            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/16 actions=output:7')),
+#             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.1.0/24 actions=output:4')),
+#             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.2.0/24 actions=output:5')),
+#             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.1.0.0/16 actions=output:6')),
+#             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/16 actions=output:7')),
+            Command(Cmd.OF_DEL,FlowDescription('table=0, tcp,nw_dst=10.0.0.1')),
+            Command(Cmd.OF_DEL,FlowDescription('table=0, tcp,nw_dst=10.0.0.0/24')),
         ]
         initials_list = [
             [Command(Cmd.OF_ADD,FlowDescription('table=0, priority=0, tcp, actions=drop'))],
@@ -226,7 +234,7 @@ class CommutativityTestSuite(object):
         failed_unsound = 0
         failed = 0
         na = 0
-        debug_cases = None #[22] # TODO JM: Debug code, remove
+        debug_cases = None #[116] # TODO JM: Debug code, remove
         print 'Running a total of {0} testcases'.format(total)
         for i in self.initials:
             for a,b in itertools.combinations_with_replacement(self.commands,2):
@@ -238,6 +246,8 @@ class CommutativityTestSuite(object):
                     tc = CommutativityTestCase(self.switch,a,b,i)
                     testcases.append(tc)
                     tc.expected = self.predictor.predict(tc)
+                    if tc.expected is None:
+                      na += 1
                     result,info_str = tc.evaluate()
                     tc.result = result
                     tc.info_str = info_str
@@ -298,7 +308,10 @@ class CommutativityPredictor(object):
         ': :type yx_y: CommandResult'
         ': :type yx_dump: CommandResult'
         
-        if testcase.a > testcase.b:
+        if testcase.a > testcase.b or (
+                                       testcase.a == testcase.b and 
+                                       hasattr(testcase.b, 'strict') and testcase.b.strict and 
+                                       hasattr(testcase.a, 'strict') and not testcase.a.strict):
             x = testcase.b
             y = testcase.a
             yx_y = testcase.first_a
@@ -307,12 +320,8 @@ class CommutativityPredictor(object):
             xy_y = testcase.second_a
             xy_x = testcase.second_b
             xy_dump = testcase.second_dump
-
-        # RESET:
-        #  - del(*) : <list of deleted flows>
         
         # add return values to results
-        
         all_results = set()
         all_results.add(xy_x)
         all_results.add(xy_y)
@@ -322,355 +331,157 @@ class CommutativityPredictor(object):
         # store all logical return values so we don't need to calculate them more than once
         for r in all_results:
             r.update_return_value(self.comparator)
-            
-
-        # Determining the rules:
-        # - Use the actual return values to see which flows were actually touched
-        # - Compare this with the "other" command to see if:
-        #   * some of the same rules were touched
-        #   * some of the same rules could be touched
         
-        # Wildcard examples:
-        # - 10.x.x.x
-        # - 10.0.x.x
-        # - 10.0.0.x
-        # - 10.0.0.1
-        # - 20.x.x.x
-        
-        # Two commands may not commute in any of the cases:
-        # - a subset b
-        # - b subset a
-        # - a equals b
-        # - a intersects b
+        # General tactic
+        # --------------
+        # - Determine conflicts for both orders A->B and B->A
+        #   - In each those orders determine conflict for both commands:
+        #     - Reorder first after second
+        #     - Reorder second before first
+        #
+        # - Combine formulas with ORs (4 clauses)
+        #
+        # Terminology
+        # -----------
+        #  p=priority, k=key/match, a=actions, r=return value
         #
         
-        # Example in the case of trace/modify:
-        #
-        # - Table:
-        #   Prio Flow       Action
-        #   5    10.x.x.x   a1
-        #   0    x.x.x.x    drop
-        #
-        # - Trace:  10.0.0.1
-        #    -> Result = (5, 10.x.x.x; a1) : matched flow
-        # - Modify: 10.x.x.x  a2
-        #    -> Result = (5, 10.x.x.x; a2) : modified flows
-        # 
-        # -> Rule: Same flows affected, different action, thus does NOT commute
-        #
-        #
-        
-        # Example in the case of add/trace:
-        # - Table:
-        #   Prio Flow       Action
-        #   5    10.x.x.x   a1
-        #   0    x.x.x.x    drop
-        #
-        # - Trace:  10.0.0.1
-        #    -> Result = (5, 10.x.x.x; a1) : matched flow
-        # - Add: 5,10.0.x.x  a2
-        #    -> Result = (5, 10.0.x.x; a2) : added flows
-        #
-        # Notice the general pattern:
-        #  - Trace can not affect add.
-        #  - Add can affect trace: A different rule would be selected if the 
-        #    trace was executed *after* the add vs. *before* the add.
-        #
-        #  1. Add/Trace:
-        #     - Trace matches the added rule after it's added -> no commute
-        #     - Trace matches a different rule because of the add -> cannot happen
-        #     - Trace matches the same rule regardless of the add -> commutes
-        #  2. Trace/add: 
-        #     - If we were to add the new rule before, the trace would match this new rule instead -> no commute
-        #     - If we were to add the new rule before, the trace would match some other rule instead -> cannot happen
-        #     - If we were to add the new rule before, the trace would still match the same rule -> commutes
-        #
-        # Commutativity rules if we are allowed to look at results explicitly:
-        #
-        #  1) add(p1,k1,a1)/<R1>   2) trace(k2)/<R2>
-        #     - Commutes, if:
-        #       R2 != R1
-        #     - (ignoring counters):
-        #       R2 != R1 or R2.a == R1.a
-        #       
-        #  1) trace(k1)/<R1>    2) add(p2,k2,a2)/<R2>
-        #     - Does not commute, if:
-        #       p2 >= R1.p and k1 in R2.k
-        #     - Commutes, if:
-        #       p2 < R1.p or k1 not in R2.k
-        #                              k2
-        #     - (ignoring counters):
-        #       p2 < R1.p or k1 not in k2 or R1.a == R2.a
-        #                                            a2
-        #
-        # Combining both sequences gives the final rule.
-        #    trace(k1)/<R1>   add(p2,k2,a2)/<R2>
-        #     
-        # Commutes if:
-        #     (R1 != R2 or R1.a == R2.a) and (p2 < R1.p or k1 not in k2 or R1.a == R2.a)
-        #  -> (R1 != R2                  and (p2 < R1.p or k1 not in k2)) or R1.a == R2.a
-        #
-        #  -> (R1 != (p2,k2,a2)          and (p2 < R1.p or k1 not in k2)) or R1.a == a2
-        #
-        #
-        # Verify using an example:
-        #
-        # - Table:
-        #   Prio Flow       Action
-        #   0    x.x.x.x    drop
-        #
-        # - trace(10.0.0.1)/<0,x.x.x.x,drop>   add(5,10.x.x.x,a2)/<>
-        #   eval: (R1 != (p2,k2,a2)          and (p2 < R1.p or k1 not in k2)) or R1.a == a2
-        #         (true                      and (false     or false       )) or false
-        #         FALSE
-        #
-        # - add(5,10.x.x.x,a1)/<>   trace(10.0.0.1)/<5,10.x.x.x,a1>
-        #   eval: (R2 != (p1,k1,a1)          and (p1 < R2.p or k2 not in k1)) or R2.a == a1
-        #         (false                     and (false     or false       )) or true
-        # 
-        #   PROBLEM!!! This is not correct...!
-        #
-        # Either we restrict the rule to not consider the "R2.a == a1" clause,
-        # or we add information about the previous state to the add() return 
-        # value.
-        #
-        # Need a way to determine what would have matched every packet matching 
-        # the newly added flow had the add not been executed.
-        # Solution: Return all rules that are less specific than the newly
-        #           added rule as the return value.
-        #
-        # i.e. we define add(p,k,a)/<R>, where R is the set of all rules in the
-        # flow table that are a superset of k.
-        #
-        # Then, can redo example:
-        # - add(5,10.x.x.x,a1)/<[0,x.x.x.x,drop]>   trace(10.0.0.1)/<5,10.x.x.x,a1>
-        #
-        #   matching up actions: R2.a == a1 now becomes:
-        #    -> select(k1,R1).a == R2.a
-        #
-        #   eval: (R2 != (p1,k1,a1)          and (p1 < R2.p or k2 not in k1)) or select(k1,R1).a == R2.a
-        #         (false                     and (false     or false       )) or false
-        # 
-        # But what if we have:
-        # - Table:
-        #   Prio Flow       Action
-        #   0    x.x.x.x    drop
-        #   5    10.0.x.x   a1
-        #   5    10.1.x.x   a2
-        #
-        # Return values?
-        #
-        # - add(5,10.x.x.x,a3)/<[5,10.0.x.x,a1;5,10.1.x.x,a2;0,x.x.x.x,drop]>
-        #   trace(10.0.0.1)/<5,10.0.x.x,a1>
-        #   -> Commutes!
-        #
-        # - add(5,10.x.x.x,a3)/<[5,10.0.x.x,a1;5,10.1.x.x,a2;0,x.x.x.x,drop]>
-        #   trace(10.3.0.1)/<5,10.x.x.x,a3>
-        #   -> Does not commute!
-        #
-        #
-        # Thus the final rule is: 
-        #   
-        #   add(pa,ka,aa)/<Ra>  trace(kt)/<Rt>
-        #
-        # Not considering statistics, and using multivalued return value:
-        # - (Rt != (pa,ka,aa) and (pa < Rt.p or kt not in ka)) or select(kt,Ra).a == Rt.a
-        # 
-        # Considering statistics, no return value for add() needed:
-        # -  Rt != (pa,ka,aa) and (pa < Rt.p or kt not in ka)
-        #
-        # Unused old rule (just slightly different, but wrong)
-        #   write(p1,k1,a1)/a_old1
-        #   read(h2)/<p2,a2>
-        #   Commutes if: not matches(h2,k1) or p2 > p1 or a1=a_old1
-        #
-        
-
-        if x.type in (Cmd.RESET, Cmd.CLEAR):
-            if y.type in (Cmd.RESET, Cmd.CLEAR):
-                return True  #always commutes
-        
-            if y.type == Cmd.TRACE:
-                return None
-                
-            if y.type == Cmd.OF_ADD:
-                return False
-        
-            if y.type == Cmd.OF_DEL:
-                return None # depends: if everything or nothing was deleted, then it commutes
-        
-            if y.type == Cmd.OF_MOD:
-                return None # depends: if nothing was modified, then it commutes
+        if x.type in (Cmd.RESET, Cmd.CLEAR) or y.type in (Cmd.RESET, Cmd.CLEAR):
+            print "Unsupported case!"
+            assert False # not supported!!
+            return None # not supported!!
+          
+        x_retvals = [xy_x.retval, yx_x.retval]
+        y_retvals = [xy_y.retval, yx_y.retval]
         
         if x.type == Cmd.TRACE:
+            # x is TRACE
+            trace = x
+            Tpka = trace.flowdesc
+            Tp = trace.flowdesc.get_priority()
+            Tk = trace.flowdesc.get_match()
+            Ta = trace.flowdesc.get_actions()
+        
             if y.type == Cmd.TRACE:
                 return True #always commutes
         
             if y.type == Cmd.OF_ADD:
-                #   add(pa,ka,aa)/<Ra>  trace(kt)/<Rt>
-                #
-                # Not considering statistics, and using multivalued return value:
-                # - (Rt != (pa,ka,aa) and (pa < Rt.p or kt not in ka)) or select(Rt.k,Ra).a == Rt.a
-                # 
-                # Considering statistics, no return value for add() needed:
-                # -  Rt != (pa,ka,aa) and (pa < Rt.p or kt not in ka)
-                
-                # Rewritten:
-                # Does NOT commute if:
-                # (Rt == (pa,ka,aa) or (pa >= Rt.p and kt in ka)) and select(Rt.k,Ra).a != Rt.a
-               
-                
-                # x is TRACE
                 # y is ADD
+                add = y
+                Apka = add.flowdesc
+                Ap = add.flowdesc.get_priority()
+                Ak = add.flowdesc.get_match()
+                Aa = add.flowdesc.get_actions()
                 
-                kt = x.flowdesc.get_match() # TRACE key
-                
-                pa_ka_aa = y.flowdesc
-                pa = pa_ka_aa.get_priority() # ADD prio
-                ka = pa_ka_aa.get_match() # ADD key
-                aa = pa_ka_aa.get_actions() # ADD action
-                
-                Rt1 = xy_x.retval # Which rule did the TRACE use (case 1: ADD was not yet executed)
-                Rt2 = yx_x.retval # Which rule did the TRACE use (case 2: ADD was already executed)
-                Rt1a = Rt1.get_actions()
-                Rt2a = Rt2.get_actions()
-                Rt1p = Rt1.get_priority()
-                Rt2p = Rt2.get_priority()
-                Rt1k = Rt1.get_match()
-                Rt2k = Rt2.get_match()
-                
-                Ra1 = xy_y.retval # Which rules did ADD override/hide that were previously there? (case 1)
-                Ra2 = yx_y.retval # Which rules did ADD override/hide that were previously there? (case 2)
-                
-                s = self.comparator.is_subset(kt,ka) # is the TRACE key a subset of the ADD key? 
-                t1 = self.comparator.select(kt,Ra1) # which rule would TRACE use from the overridden/hidden rules (case 1)
-                t2 = self.comparator.select(kt,Ra2) # which rule would TRACE use from the overridden/hidden rules (case 2)
-                u1 = t1.get_actions() # what would the corresponding action be (case 1)
-                u2 = t2.get_actions() # what would the corresponding action be (case 2)
-                
-                
-                # Case 1: TRACE->ADD. At the time of the check, TRACE was already executed but ADD not.
-                xy_conflicts = ((Rt1 == pa_ka_aa) or (pa >= Rt1p and s)) and u1 != Rt1a
-                
-                #               the TRACE chose the ADD exactly
-                #                                     the TRACE chose some other rule, but it would also match
-                #                                     the ADD, and the ADD has higher priority
-                #                                                            out of all the rules the ADD replaced
-                
-                # Case 2; ADD->TRACE. At the time of the check, ADD was already executed but TRACE was not.
-                yx_conflicts = ((Rt2 == pa_ka_aa) or (pa >= Rt2p and s)) and u2 != Rt2a
-                
-                
-                
-                #
-                # General pattern:
-                # - Determine conflicts for both orders A->B and B->A
-                #   - In each those orders determine conflict for both commands:
-                #     - Here, ADD never conflicts
-                #     - TRACE may conflict
-                #
-                # - Combine formulas with ORs. Here this results in 2 clauses, in the general case we will get 4.
-                #
-                
-                # TRACE -> ADD
-                xy_conflicts = (s and pa >= Rt1p and aa != Rt1a)
-                # ADD -> TRACE
-                yx_conflicts = (Rt2 == pa_ka_aa and u2 != Rt2a)
-                
-                xy_conflicts = (s and pa >= Rt1p and aa != Rt1a) or (Rt1 == pa_ka_aa and u1 != Rt1a)
-                yx_conflicts = (s and pa >= Rt2p and aa != Rt2a) or (Rt2 == pa_ka_aa and u2 != Rt2a)
-                
-                
-                
+                def _trace_add(Tr,Ar):
+                  Tr_read = Tr
+                  Ar_added = Ar[0]
+                  Ar_before_matches = Ar[1]
+                  # is the TRACE key a subset of the ADD key?
+                  Tk_is_subset_of_Ak = self.comparator.is_subset(Tk,Ak)
+                  # which rule would TRACE use from the overridden/hidden rules
+                  select_Tk_from_Ar = self.comparator.select(Tk,Ar_before_matches)
+                  
+                  
+                  return (
+                          Tr_read not in Ar_added and
+                          Tk_is_subset_of_Ak and
+                          Ap >= Tr.get_priority() and
+                          Aa != Tr.get_actions()
+                          ) or (
+                          Tr_read in Ar_added and 
+                          select_Tk_from_Ar.get_actions() != Tr_read.get_actions()
+                          )
+                  
                 # To be a valid specification, the rule has to produce the same output for each case. In reality,
                 # only one of the cases will be available for checking.
-                assert xy_conflicts == yx_conflicts
-                return not xy_conflicts
-        
+                case1 = _trace_add(x_retvals[0], y_retvals[0])
+                case2 = _trace_add(x_retvals[1], y_retvals[1])
+                assert case1 == case2
+                return not case1
+              
             if y.type == Cmd.OF_DEL:
-                if y.strict:
-                    return None
-                else:
-                    return None
-        
-            if y.type == Cmd.OF_MOD:
-                if y.strict:
-                    return None
-                else:
-                    return None
-        
-#         if x.type == Cmd.OF_ADD:
-#             if x.strict:
-#                 if y.type == Cmd.OF_ADD:
-#                     return None
-#         
-#                 if y.type == Cmd.OF_DEL:
-#                     if y.strict:
-#                         return None
-#                     else:
-#                         return None
-#         
-#                 if y.type == Cmd.OF_MOD:
-#                     if y.strict:
-#                         return None
-#                     else:
-#                         return None
-#             else:
-#                 if y.type == Cmd.OF_ADD:
-#                     return None
-#         
-#                 if y.type == Cmd.OF_DEL:
-#                     if y.strict:
-#                         return None
-#                     else:
-#                         return None
-#         
-#                 if y.type == Cmd.OF_MOD:
-#                     if y.strict:
-#                         return None
-#                     else:
-#                         return None
-#         
-#         if x.type == Cmd.OF_DEL:
-#             if x.strict:
-#                 if y.type == Cmd.OF_DEL:
-#                     if y.strict:
-#                         return None
-#                     else:
-#                         return None
-#         
-#                 if y.type == Cmd.OF_MOD:
-#                     if y.strict:
-#                         return None
-#                     else:
-#                         return None
-#             else:
-#                 if y.type == Cmd.OF_DEL:
-#                     if y.strict:
-#                         return None
-#                     else:
-#                         return None
-#         
-#                 if y.type == Cmd.OF_MOD:
-#                     if y.strict:
-#                         return None
-#                     else:
-#                         return None
-#         
-#         if x.type == Cmd.OF_MOD:
-#             if x.strict:
-#                 if y.type == Cmd.OF_MOD:
-#                     if y.strict:
-#                         return None
-#                     else:
-#                         return None
-#             else:
-#                 if y.type == Cmd.OF_MOD:
-#                     if y.strict:
-#                         return None
-#                     else:
-#                         return None
-
+                # y is DEL
+                delete = y
+                Dpka = delete.flowdesc
+                Dp = delete.flowdesc.get_priority()
+                Dk = delete.flowdesc.get_match()
+                Da = delete.flowdesc.get_actions()
+                
+                def _trace_delete(Tr,Dr):
+                  Tr_read = Tr
+                  Dr_deleted = Dr[0]
+                  Dr_aftermatches = Dr[1]
+                  
+                  select_Tk_Dr_aftermatches = self.comparator.select(Tk, Dr_aftermatches)                 
+                  select_Tk_Dr_deleted = self.comparator.select(Tk, Dr_deleted)                 
+                  
+                  return (
+                          Tr_read in Dr_deleted and
+                          select_Tk_Dr_aftermatches.get_actions() != Tr.get_actions()
+                          ) or (
+                          Tr_read not in Dr_deleted and 
+                          select_Tk_Dr_deleted.get_priority() >= Tr_read.get_priority() and
+                          select_Tk_Dr_deleted.get_actions() != Tr_read.get_actions()
+                          )
+                  
+                case1 = _trace_delete(x_retvals[0], y_retvals[0])
+                case2 = _trace_delete(x_retvals[1], y_retvals[1])
+                assert case1 == case2
+                return not case1
+        if x.type == Cmd.OF_ADD:
+          # x is ADD
+          add = x
+          Apka = add.flowdesc
+          Ap = add.flowdesc.get_priority()
+          Ak = add.flowdesc.get_match()
+          Aa = add.flowdesc.get_actions()
+      
+          if y.type == Cmd.OF_ADD:
+            add2 = x
+            A2pka = add2.flowdesc
+            A2p = add2.flowdesc.get_priority()
+            A2k = add2.flowdesc.get_match()
+            A2a = add2.flowdesc.get_actions()
+            
+            
+            def _add_add(A1r,A2r):
+              is_overwrite = A1r[2] or A2r[2]
+              return not is_overwrite and Ap == A2p and Ak == A2k and Aa != A2a
+          
+            case1 = _add_add(x_retvals[0], y_retvals[0])
+            return not case1
+            
+          if y.type == Cmd.OF_DEL:
+            delete = y
+            Dpka = delete.flowdesc
+            Dp = delete.flowdesc.get_priority()
+            Dk = delete.flowdesc.get_match()
+            Da = delete.flowdesc.get_actions()
+            
+            def _add_delete(Ar,Dr):
+              Ar_added = Ar[0]
+              
+              Ar_before_matches = Ar[1]
+              Dr_deleted = Dr[0]
+              Dr_aftermatches = Dr[1]
+              
+              Ak_is_subset_of_Dk = self.comparator.is_subset(Ak,Dk)
+              
+              return (
+                      Ar_added in Dr_deleted
+                      ) or (
+                      Ak_is_subset_of_Dk
+                      # TODO JM: Do (out_port) is NOT handled
+                      # TODO JM: is_strict is NOT handled
+                      )
+              
+            case1 = _add_delete(x_retvals[0], y_retvals[0])
+            case2 = _add_delete(x_retvals[1], y_retvals[1])
+            assert case1 == case2
+            return not case1
+            
+                
 class IntersectionNonEmptyTestCase(object):
     def __init__(self,comparator,a,b,expected=None):
         self.comparator = comparator
@@ -827,6 +638,7 @@ class FlowComparator(object):
             ': :type t: FlowDescription'
             t.fields['check_overlap'] = None #enables overlap checking (key has no value, thus None)
             cmd_ret = self.switch.executeCommand(Command(Cmd.OF_ADD,t))
+            t.remove_check_overlap()
             ': :type cmd_ret: CommandResult'
             assert not cmd_ret.overlap_error
         cmd_ret = self.switch.executeCommand(Command(Cmd.TRACE,s))
@@ -860,11 +672,11 @@ class FlowComparator(object):
             return False
         
     def subset_set(self,s,flow_set):
-        """Return all flows that are a subset of s
+        """Return all flows that are a subset of s (are more strict than s)
         """
         subset_flows = set()
         for t in flow_set:
-            if self.is_subset(s, t):
+            if self.is_subset(t, s): #s is more general
                 subset_flows.add(t)
         return subset_flows
     
@@ -878,7 +690,7 @@ class FlowComparator(object):
         return intersecting_flows
     
     def superset_set(self,s,flow_set):
-        """Return all flows that are a superset of s (s is a subset of)
+        """Return all flows that are a superset of s (s is a subset of) (are more general than s)
         """
         superset_flows = set()
         for t in flow_set:
@@ -887,7 +699,7 @@ class FlowComparator(object):
         return superset_flows
 
     def is_subset(self,s,t):
-        """Do all packets matching s also match t?
+        """Do all packets matching s also match t (t is more general)?
         :type s: FlowDescription
         :type t: FlowDescription
         :rtype: bool
@@ -966,6 +778,9 @@ class CommandResult(object):
         # was an OFPFMFC_OVERLAP error returned?
         self.overlap_error = None
         self.retval = None
+        # special maps for OF_MOD
+        self.before_to_after = None
+        self.after_to_before = None
         
     def update_return_value(self,comparator):
         self.retval = self._calc_return_value(comparator)
@@ -1014,15 +829,52 @@ class CommandResult(object):
         for t in superset_flows:
             t_prio = t.get_priority()
             if t_prio > s_prio:
-                return set() # empty set
-        return superset_flows
+                superset_flows = set() # superset_flows will never be used
+                break
+        for x in self.added_flows:
+          x.remove_statistics()
+        for x in superset_flows:
+          x.remove_statistics()
+        is_overwrite = False
+        if self.overwritten_flows is not None and len(self.overwritten_flows) > 0:
+          is_overwrite = True
+        return (self.added_flows, superset_flows, is_overwrite)
 
     def _retval_of_del(self,comparator):
         # Return all rules that were removed by the deletion.
-        return self.removed_flows
+        # Also return the superset to be more precise
+        s = FlowDescription(str(self.cmd.flowdesc))
+        s.remove_statistics()
+        s.remove_priority()
+        s.remove_actions()
+        superset_flows = comparator.superset_set(s, self.before_set)
+        superset_flows = superset_flows.difference(self.removed_flows)
+        for t in superset_flows:
+            t_prio = t.get_priority()
+            for v in self.removed_flows:
+              v_prio = v.get_priority()
+              if t_prio > v_prio:
+                superset_flows = set() # superset_flows will never be used
+                break
+        for x in self.removed_flows:
+          x.remove_statistics()
+        for x in superset_flows:
+          x.remove_statistics()
+        return (self.removed_flows, superset_flows)
     def _retval_of_mod(self,comparator):
-        # Return all rules that have a different action after modification
-        return self.affected_flows        
+        # MODIFY works as ADD if there is nothing to modify
+        is_add = False
+        if len(self.added_flows) > 0:
+          is_add = True 
+        if is_add:
+          add_retvals = self._retval_of_add(comparator) 
+          return (is_add, add_retvals)
+        else:
+          for x in self.before_to_after:
+            x.remove_statistics()
+          for x in self.after_to_before:
+            x.remove_statistics()
+          return (is_add, self.before_to_after, self.after_to_before)
     def _retval_of_bar(self,comparator):
         # No return value
         return None
@@ -1048,13 +900,27 @@ class OvsSwitch(object):
             result.before_set = set(before.dumped_flows)
             result.after_set = set(after.dumped_flows)
 
-            result.removed_flows = result.before_set.difference(result.after_set)
-            result.added_flows = result.after_set.difference(result.before_set)
+            result.removed_flows = result.before_set.difference(result.after_set) # in before, but not after
+            result.added_flows = result.after_set.difference(result.before_set) # in after, but not before
             result.affected_flows = result.before_set.symmetric_difference(result.after_set)
+            
+            if cmd == Cmd.OF_MOD:
+              result.before_to_after = []
+              result.after_to_before = []
+              
+              for b in result.removed_flows:
+                # find corresponding flow in added table
+                x = b.get_get_match_priority()
+                for a in result.added_flows:
+                  y = a.get_match_priority()
+                  if x == y:
+                    result.before_to_after[b] = a
+                    result.after_to_before[a] = b
             
             # OF_ADD is a special case, as it may overwrite itself but we have no way to detect this with OVS (we could look at the 'duration' field but that is not guaranteed to work)
             if cmd == Cmd.OF_ADD and len(result.affected_flows) == 0:
                 result.overwritten_flows.add(cmd.flowdesc)
+                result.added_flows.add(cmd.flowdesc)
                 result.affected_flows.add(cmd.flowdesc)
               
             return result
@@ -1235,6 +1101,9 @@ class FlowDescription(object):
         self.fields.pop('actions',None)
         self.actions = None
     
+    def remove_check_overlap(self):
+        self.fields.pop('check_overlap',None)
+    
     def remove_table(self):
         self.fields.pop('table',None)
         
@@ -1300,7 +1169,16 @@ class FlowDescription(object):
         result.remove_priority()
         result.remove_actions()
         return result
-        
+      
+    def get_match_priority(self):
+        """Get a copy of this FlowDescription with stats, actions removed.
+        :rtype: FlowDescription
+        """
+        result = self.copy()
+        result.remove_statistics()
+        result.remove_actions()
+        return result
+      
     def set_priority(self,p):
         """Set 'priority' field to integer value p
         :type p: int
@@ -1394,3 +1272,533 @@ def run_cmdline_string(cmdline, *args, **kwargs):
 if __name__ == "__main__":
     app = MainApp()
     app.run();
+    
+# Determining the rules:
+        # - Use the actual return values to see which flows were actually touched
+        # - Compare this with the "other" command to see if:
+        #   * some of the same rules were touched
+        #   * some of the same rules could be touched
+        
+        # Wildcard examples:
+        # - 10.x.x.x
+        # - 10.0.x.x
+        # - 10.0.0.x
+        # - 10.0.0.1
+        # - 20.x.x.x
+        
+        # Two commands may not commute in any of the cases:
+        # - a subset b
+        # - b subset a
+        # - a equals b
+        # - a intersects b
+        #
+        
+        # Example in the case of trace/modify:
+        #
+        # - Table:
+        #   Prio Flow       Action
+        #   5    10.x.x.x   a1
+        #   0    x.x.x.x    drop
+        #
+        # - Trace:  10.0.0.1
+        #    -> Result = (5, 10.x.x.x; a1) : matched flow
+        # - Modify: 10.x.x.x  a2
+        #    -> Result = (5, 10.x.x.x; a2) : modified flows
+        # 
+        # -> Rule: Same flows affected, different action, thus does NOT commute
+        #
+        #
+        
+        # Example in the case of add/trace:
+        # - Table:
+        #   Prio Flow       Action
+        #   5    10.x.x.x   a1
+        #   0    x.x.x.x    drop
+        #
+        # - Trace:  10.0.0.1
+        #    -> Result = (5, 10.x.x.x; a1) : matched flow
+        # - Add: 5,10.0.x.x  a2
+        #    -> Result = (5, 10.0.x.x; a2) : added flows
+        #
+        # Notice the general pattern:
+        #  - Trace can not affect add.
+        #  - Add can affect trace: A different rule would be selected if the 
+        #    trace was executed *after* the add vs. *before* the add.
+        #
+        #  1. Add/Trace:
+        #     - Trace matches the added rule after it's added -> no commute
+        #     - Trace matches a different rule because of the add -> cannot happen
+        #     - Trace matches the same rule regardless of the add -> commutes
+        #  2. Trace/add: 
+        #     - If we were to add the new rule before, the trace would match this new rule instead -> no commute
+        #     - If we were to add the new rule before, the trace would match some other rule instead -> cannot happen
+        #     - If we were to add the new rule before, the trace would still match the same rule -> commutes
+        #
+        # Commutativity rules if we are allowed to look at results explicitly:
+        #
+        #  1) add(p1,k1,a1)/<R1>   2) trace(k2)/<R2>
+        #     - Commutes, if:
+        #       R2 != R1
+        #     - (ignoring counters):
+        #       R2 != R1 or R2.a == R1.a
+        #       
+        #  1) trace(k1)/<R1>    2) add(p2,k2,a2)/<R2>
+        #     - Does not commute, if:
+        #       p2 >= R1.p and k1 in R2.k
+        #     - Commutes, if:
+        #       p2 < R1.p or k1 not in R2.k
+        #                              k2
+        #     - (ignoring counters):
+        #       p2 < R1.p or k1 not in k2 or R1.a == R2.a
+        #                                            a2
+        #
+        # Combining both sequences gives the final rule.
+        #    trace(k1)/<R1>   add(p2,k2,a2)/<R2>
+        #     
+        # Commutes if:
+        #     (R1 != R2 or R1.a == R2.a) and (p2 < R1.p or k1 not in k2 or R1.a == R2.a)
+        #  -> (R1 != R2                  and (p2 < R1.p or k1 not in k2)) or R1.a == R2.a
+        #
+        #  -> (R1 != (p2,k2,a2)          and (p2 < R1.p or k1 not in k2)) or R1.a == a2
+        #
+        #
+        # Verify using an example:
+        #
+        # - Table:
+        #   Prio Flow       Action
+        #   0    x.x.x.x    drop
+        #
+        # - trace(10.0.0.1)/<0,x.x.x.x,drop>   add(5,10.x.x.x,a2)/<>
+        #   eval: (R1 != (p2,k2,a2)          and (p2 < R1.p or k1 not in k2)) or R1.a == a2
+        #         (true                      and (false     or false       )) or false
+        #         FALSE
+        #
+        # - add(5,10.x.x.x,a1)/<>   trace(10.0.0.1)/<5,10.x.x.x,a1>
+        #   eval: (R2 != (p1,k1,a1)          and (p1 < R2.p or k2 not in k1)) or R2.a == a1
+        #         (false                     and (false     or false       )) or true
+        # 
+        #   PROBLEM!!! This is not correct...!
+        #
+        # Either we restrict the rule to not consider the "R2.a == a1" clause,
+        # or we add information about the previous state to the add() return 
+        # value.
+        #
+        # Need a way to determine what would have matched every packet matching 
+        # the newly added flow had the add not been executed.
+        # Solution: Return all rules that are less specific than the newly
+        #           added rule as the return value.
+        #
+        # i.e. we define add(p,k,a)/<R>, where R is the set of all rules in the
+        # flow table that are a superset of k.
+        #
+        # Then, can redo example:
+        # - add(5,10.x.x.x,a1)/<[0,x.x.x.x,drop]>   trace(10.0.0.1)/<5,10.x.x.x,a1>
+        #
+        #   matching up actions: R2.a == a1 now becomes:
+        #    -> select(k1,R1).a == R2.a
+        #
+        #   eval: (R2 != (p1,k1,a1)          and (p1 < R2.p or k2 not in k1)) or select(k1,R1).a == R2.a
+        #         (false                     and (false     or false       )) or false
+        # 
+        # But what if we have:
+        # - Table:
+        #   Prio Flow       Action
+        #   0    x.x.x.x    drop
+        #   5    10.0.x.x   a1
+        #   5    10.1.x.x   a2
+        #
+        # Return values?
+        #
+        # - add(5,10.x.x.x,a3)/<[5,10.0.x.x,a1;5,10.1.x.x,a2;0,x.x.x.x,drop]>
+        #   trace(10.0.0.1)/<5,10.0.x.x,a1>
+        #   -> Commutes!
+        #
+        # - add(5,10.x.x.x,a3)/<[5,10.0.x.x,a1;5,10.1.x.x,a2;0,x.x.x.x,drop]>
+        #   trace(10.3.0.1)/<5,10.x.x.x,a3>
+        #   -> Does not commute!
+        #
+        #
+        # Thus the final rule is: 
+        #   
+        #   add(pa,ka,aa)/<Ra>  trace(kt)/<Rt>
+        #
+        # Not considering statistics, and using multivalued return value:
+        # - (Rt != (pa,ka,aa) and (pa < Rt.p or kt not in ka)) or select(kt,Ra).a == Rt.a
+        # 
+        # Considering statistics, no return value for add() needed:
+        # -  Rt != (pa,ka,aa) and (pa < Rt.p or kt not in ka)
+        #
+        # Unused old rule (just slightly different, but wrong)
+        #   write(p1,k1,a1)/a_old1
+        #   read(h2)/<p2,a2>
+        #   Commutes if: not matches(h2,k1) or p2 > p1 or a1=a_old1
+        #
+        
+        
+#                 # Case 1: TRACE->ADD. At the time of the check, TRACE was already executed but ADD not.
+#                 xy_conflicts = (
+#                                   (case1_trace_result == add.flowdesc) or
+#                                   (  
+#                                      add_prio >= case1_trace_result.get_priority() 
+#                                      and 
+#                                      trace_key_is_subset_of_add_key
+#                                   )
+#                                 ) and case1_select_trace_key_from_add_result.get_actions() != case1_trace_result.get_actions()
+#                 
+#                 
+#                 
+#                 #               the TRACE chose the ADD exactly or
+#                 #                                     the TRACE chose some other rule, but it would also match
+#                 #                                     the ADD, and the ADD has higher priority
+#                 #                                                            out of all the rules the ADD replaced
+#                 
+#                 # Case 2; ADD->TRACE. At the time of the check, ADD was already executed but TRACE was not.
+#                 yx_conflicts = (
+#                                  case2_trace_result == add.flowdesc or 
+#                                 ( add_prio >= case1_trace_result.get_priority()
+#                                   and 
+#                                   trace_key_is_subset_of_add_key
+#                                 )
+#                                ) and case2_select_trace_key_from_add_result.get_actions() != case2_trace_result.get_actions()
+#                 
+#
+
+#                 #   add(Ap,Ak,Aa)/<Ar>  trace(Tk)/<Tr>
+#                 #
+#                 # Not considering statistics, and using multivalued return value:
+#                 # - (Rt != (pa,ka,aa) and (pa < Rt.p or kt not in ka)) or select(Rt.k,Ra).a == Rt.a
+#                 # 
+#                 # Considering statistics, no return value for add() needed:
+#                 # -  Rt != (pa,ka,aa) and (pa < Rt.p or kt not in ka)
+#                 
+#                 # Rewritten:
+#                 # Does NOT commute if:
+#                 # (Rt == (pa,ka,aa) or (pa >= Rt.p and kt in ka)) and select(Rt.k,Ra).a != Rt.a                      
+
+# if y.type == Cmd.OF_DEL:
+#                 if y.strict:
+#                   #  trace(Tk)/<Tr>  del_strict(Dp,Dk)/<Dr>
+#                   
+#                   # TRACE -> DEL_STRICT
+#                   # ------------
+#                   # Moving TRACE after DEL_STRICT will change the outcome of the TRACE if:
+#                   # the trace matched the deleted flow
+#                   # --> (Tr.pka == Dr.removed_rules.pka and select(Tk, Dr.superset).a != Tr.a)
+#                   #
+#                   # simplified, when considering statistics:
+#                   # --> (Tr.pka == Dr.removed_rules.pka)
+#                   #
+#                   # Moving DEL_STRICT before TRACE will change the outcome of the DEL_STRICT if:
+#                   # --> never!
+#                   #
+#                   
+#                   # DEL_STRICT -> TRACE
+#                   # ------------
+#                   # Moving DEL_STRICT after TRACE will change the outcome of the DEL_STRICT if:
+#                   # --> never!
+#                   #
+#                   # Moving TRACE before DEL_STRICT will change the outcome of the TRACE if:
+#                   # the trace would have matched the deleted rule, and the deleted rule
+#                   # had a higher priority than the selected one.
+#                   # --> (Tk in Dr.removed_rules.k and Dr.removed_rules.p >= Tr.p and Dr.removed_rules.a != Tr.a)
+#                   #
+#                   # simplified, when considering statistics:
+#                   # --> (Tk in Dr.removed_rules.k and Dr.removed_rules.p >= Tr.p)
+#                   
+#                   return None
+#                 else:
+#                   #  trace(Tk)/<Tr>  del(Dk)/<Dr>
+#                   
+#                   # TODO JM: possibly this would also work with solely comparing Tk and Dk
+#                   
+#                   # TRACE -> DEL
+#                   # ------------
+#                   # Moving TRACE after DEL will change the outcome of the TRACE if:
+#                   # the trace matched a deleted flow
+#                   # --> (Dr.removed_rules.contains(Tr) and select(Tk, Dr.superset).a != Tr.a)
+#                   #
+#                   # simplified, when considering statistics:
+#                   # --> (Dr.removed_rules.contains(Tr))
+#                   #
+#                   # Moving DEL before TRACE will change the outcome of the DEL if:
+#                   # --> never!
+#                   #
+#                   
+#                   # DEL -> TRACE
+#                   # ------------
+#                   # Moving DEL after TRACE will change the outcome of the DEL if:
+#                   # --> never!
+#                   #
+#                   # Moving TRACE before DEL will change the outcome of the TRACE if:
+#                   # the trace would have matched a deleted rule, and the deleted rule
+#                   # had a higher priority than the selected one.
+#                   # --> OR over all i: (Tk in Dr.removed_rules[i].k and Dr.removed_rules[i].p >= Tr.p and Dr.removed_rules[i].a != Tr.a)
+#                   #
+#                   # simplified, when considering statistics:
+#                   # ->> OR over all i: (Tk in Dr.removed_rules[i].k and Dr.removed_rules[i].p >= Tr.p)
+#                   
+#                   return None
+#         
+#             if y.type == Cmd.OF_MOD:
+#                 if y.strict:
+#                   #  trace(Tk)/<Tr>  mod_strict(Mp,Mk,Ma)/<Mr>
+#                   
+#                   # TRACE -> MOD_STRICT
+#                   # ------------
+#                   # Moving TRACE after MOD_STRICT will change the outcome of the TRACE if:
+#                   # --> (not Mr.is_add and (Tr == Mr and Mr.a != Ma)) or 
+#                   #     (Mr.is_add and (Tk in Mk and Mp >= Tr.p and Ma != Tr.a)) # same as ADD
+#                   #
+#                   # simplified, when considering statistics:
+#                   # --> (not Mr.is_add and (Tr == Mr and Mr.a != Ma)) or 
+#                   #     (Mr.is_add and (Tk in Mk and Mp >= Tr.p)) # same as ADD w/ statistics, note that mod itself does not alter stats
+#                   #
+#                   # Moving MOD_STRICT before TRACE will change the outcome of the MOD_STRICT if:
+#                   # --> never!
+#                   #
+#                   
+#                   # MOD_STRICT -> TRACE
+#                   # ------------
+#                   # Moving MOD_STRICT after TRACE will change the outcome of the MOD_STRICT:
+#                   # --> never!
+#                   #
+#                   # Moving TRACE before MOD_STRICT will change the outcome of the TRACE if:
+#                   # the trace used the modified version.
+#                   # --> (not Mr.is_add and (Tr.p == Mr.p and Tr.k == Mr.k and Tr.a != Ma)) or
+#                   #     (Mr.is_add and (Tr.pka == M.pka and select(Tk, Mr.superset).a != Tr.a)) # same as ADD
+#                   #
+#                   # simplified, when considering statistics:
+#                   # --> (not Mr.is_add and (Tr.p == Mr.p and Tr.k == Mr.k and Tr.a != Ma)) or
+#                   #     (Mr.is_add and (Tr.pka == M.pka)) # same as ADD w/ statistics, note that mod itself does not alter stats
+#                   
+#                   return None
+#                 else:
+#                   #  trace(Tk)/<Tr>  mod(Mk,Ma)/<Mr>
+#                   
+#                   # TRACE -> MOD
+#                   # ------------
+#                   # Moving TRACE after MOD will change the outcome of the TRACE if:
+#                   # --> (not Mr.is_add and (Mr.contains(Tr) and Tr.a != Ma)) or 
+#                   #     (Mr.is_add and (Tk in Mk and Mp >= Tr.p and Ma != Tr.a)) # same as ADD
+#                   #
+#                   # simplified, when considering statistics:
+#                   # --> (not Mr.is_add and (Mr.contains(Tr))) or 
+#                   #     (Mr.is_add and (Tk in Mk and Mp >= Tr.p)) # same as ADD w/ statistics, note that mod itself does not alter stats
+#                   #
+#                   # Moving MOD before TRACE will change the outcome of the MOD if:
+#                   # --> never!
+#                   #
+#                   
+#                   # MOD -> TRACE
+#                   # ------------
+#                   # Moving MOD after TRACE will change the outcome of the MOD:
+#                   # --> never!
+#                   #
+#                   # Moving TRACE before MOD will change the outcome of the TRACE if:
+#                   # the trace used the modified version.
+#                   # --> (not Mr.is_add and OR over all i: (Tr.p == Mr[i].p and Tr.k == Mr[i].k and Mr[i].a != Ma)) or
+#                   #     (Mr.is_add and (Tr.pka == M.pka and select(Tk, Mr.superset).a != Tr.a)) # same as ADD
+#                   #
+#                   # simplified, when considering statistics:
+#                   # --> (not Mr.is_add and [OR over all i: (Tr.p == Mr[i].p and Tr.k == Mr[i].k and Mr[i].a != Ma)]) or
+#                   #     (Mr.is_add and (Tr.pka == M.pka)) # same as ADD w/ statistics, note that mod itself does not alter stats
+#                   
+#                   return None
+#         
+#         if x.type == Cmd.OF_ADD:
+#               if y.type == Cmd.OF_ADD:
+#                 #  add(A1p,A1k,A1a)/<A1r>  add(A2p,A2k,A2a)/<A2r>
+# 
+#                 # ADD -> ADD
+#                 # ------------
+#                 # Moving ADD after ADD will change the outcome of the ADD if:
+#                 # the ADDS overwrite each other.
+#                 #
+#                 # --> (A1.p == A2.p and A1.k == A2.k and A1.a != A2.a )
+#                 #
+#                 # simplified, when considering statistics:
+#                 # --> (A1.p == A2.p and A1.k == A2.k)
+#                 #
+#                 return None
+#        
+#               if y.type == Cmd.OF_DEL:
+#                   if y.strict:
+#                     #  add(Ap,Ak,Aa)/<Ar>  del_strict(Dp,Dk)/<Dr>
+#                 
+#                     # ADD -> DEL_STRICT
+#                     # ------------
+#                     # Moving ADD after DEL_STRICT will change the outcome of the ADD if:
+#                     # del_strict deletes the added key
+#                     # --> (Ap == Dp and Ak == Dk)
+#                     #
+#                     # Moving DEL_STRICT before ADD will change the outcome of the DEL_STRICT if:
+#                     # del_strict deletes the added key
+#                     # --> (Ap == Dp and Ak == Dk)
+#                     #
+#                     
+#                     # DEL_STRICT -> ADD
+#                     # ------------
+#                     # Moving DEL_STRICT after ADD will change the outcome of the DEL_STRICT if:
+#                     # del_strict would delete the added key
+#                     # --> (Ap == Dp and Ak == Dk)
+#                     #
+#                     #
+#                     # Moving ADD before DEL_STRICT will change the outcome of the ADD if:
+#                     # del_strict would delete the added key
+#                     # --> (Ap == Dp and Ak == Dk)
+#                     #
+#                     return None
+#                   else:
+#                     #  add(Ap,Ak,Aa)/<Ar>  del(Dk)/<Dr>
+#                 
+#                     # ADD -> DEL
+#                     # ------------
+#                     # Moving ADD after DEL will change the outcome of the ADD if:
+#                     #
+#                     # --> (Ak in Dk)
+#                     #
+#                     #
+#                     # Moving DEL before ADD will change the outcome of the DEL if:
+#                     #
+#                     # --> (Ak in Dk)
+#                     #
+#                     
+#                     # DEL -> ADD
+#                     # ------------
+#                     # Moving DEL after ADD will change the outcome of the DEL if:
+#                     #
+#                     # --> (Ak in Dk)
+#                     #
+#                     #
+#                     # Moving ADD before DEL will change the outcome of the ADD if:
+#                     #
+#                     # --> (Ak in Dk)
+#                     #
+#                     return None
+#        
+#               if y.type == Cmd.OF_MOD:
+#                   if y.strict:
+#                     #  add(Ap,Ak,Aa)/<Ar>  mod_strict(Mp,Mk,Ma)/<Mr>
+#                 
+#                     # ADD -> MOD_STRICT
+#                     # ------------
+#                     # Moving ADD after MOD_STRICT will change the outcome of the ADD if:
+#                     # add replaces or modifys a rule added (!) by mod_strict
+#                     # --> (Ap == Mp and Ak == Mk and Aa != Ma)
+#                     #
+#                     # simplified, statistics:
+#                     # --> (Ap == Mp and Ak == Mk)
+#                     #
+#                     # Moving MOD_STRICT before ADD will change the outcome of the MOD_STRICT if:
+#                     #
+#                     # --> (Ap == Mp and Ak in Mk and Aa != Ma)
+#                     #
+#                     # simplified, statistics:
+#                     # --> (Ap == Mp and Ak == Mk)
+#                     #
+#                     
+#                     # MOD_STRICT -> ADD
+#                     # ------------
+#                     # Moving MOD_STRICT after ADD will change the outcome of the MOD_STRICT if:
+#                     #
+#                     # --> (Ap == Mp and Ak in Mk and Aa != Ma)
+#                     #
+#                     # simplified, statistics:
+#                     # --> (Ap == Mp and Ak == Mk)
+#                     #
+#                     # Moving Add before MOD_STRICT will change the outcome of the ADD if:
+#                     #
+#                     # --> (Ap == Mp and Ak in Mk and Aa != Ma)
+#                     #
+#                     # simplified, statistics:
+#                     # --> (Ap == Mp and Ak == Mk)
+#                     
+#                     return None
+#                   else:
+#                     #  add(Ap,Ak,Aa)/<Ar>  mod(Mk,Ma)/<Mr>
+#                 
+#                     # ADD -> MOD
+#                     # ------------
+#                     # Moving ADD after MOD will change the outcome of the ADD if:
+#                     #
+#                     # --> (Ak in Mk and Aa != Ma)
+#                     #
+#                     #
+#                     # Moving MOD before ADD will change the outcome of the MOD if:
+#                     #
+#                     # --> (Ak in Mk and Aa != Ma)
+#                     #
+#                     
+#                     # MOD -> ADD
+#                     # ------------
+#                     # Moving MOD after ADD will change the outcome of the MOD if:
+#                     #
+#                     # --> (Ak in Mk and Aa != Ma)
+#                     #
+#                     #
+#                     # Moving Add before MOD will change the outcome of the ADD if:
+#                     #
+#                     # --> (Ak in Mk and Aa != Ma)
+#                     #
+#                     return None
+#          
+#         if x.type == Cmd.OF_DEL:
+#             if x.strict:
+#                 if y.type == Cmd.OF_DEL:
+#                     if y.strict:
+#                       #  del_strict(D1p,D1k)/<D1r>  del_strict(D2p,D2k)/<D2r>
+#                 
+#                       # DEL_STRICT -> DEL_STRICT
+#                       # ------------
+#                       # Moving DEL_STRICT after DEL_STRICT will change the outcome of the DEL_STRICT if:
+#                       #
+#                       # --> never
+#                       #
+#                       return None
+#                     else:
+#                       #  del_strict(D1p,D1k)/<D1r>  del(D2k)/<D2r>
+#                 
+#                       # DEL_STRICT -> DEL
+#                       # ------------
+#                       # Moving DEL_STRICT after DEL will change the outcome of the DEL_STRICT if:
+#                       #
+#                       # --> never
+#                       #
+#                       #
+#                       # Moving DEL before DEL_STRICT will change the outcome of the DEL if:
+#                       #
+#                       # --> never
+#                       #
+#                       
+#                       # DEL -> DEL_STRICT
+#                       # ------------
+#                       # Moving DEL after DEL_STRICT will change the outcome of the DEL if:
+#                       #
+#                       # --> never
+#                       #
+#                       #
+#                       # Moving DEL_STRICT before DEL will change the outcome of the DEL_STRICT if:
+#                       #
+#                       # --> never
+#                       #
+#                       return None
+#          
+#                 if y.type == Cmd.OF_MOD:
+#                     if y.strict:
+#                         return None # same as above
+#                     else:
+#                         return None # same as above
+#             else:         
+#                 if y.type == Cmd.OF_MOD:
+#                     if y.strict:
+#                         return None # same as above
+#                     else:
+#                         return None # same as above
+#          
+#         if x.type == Cmd.OF_MOD:
+#             if x.strict:
+#                 if y.type == Cmd.OF_MOD:
+#                     if y.strict:
+#                       return None # same as above
+#                     else:
+#                       return None # same as above
