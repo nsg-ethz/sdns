@@ -236,6 +236,7 @@ class CommutativityTestSuite(object):
         failed_unsound = 0
         failed = 0
         na = 0
+        skipped = 0
         total = 0
         
         valid_types = [Cmd.TRACE, Cmd.OF_ADD, Cmd.OF_DEL, Cmd.OF_MOD]
@@ -248,8 +249,7 @@ class CommutativityTestSuite(object):
         
         total = total * len(self.initials)
         
-        print 'Running a total of {0} testcases out of {1} permutations'.format(total, total_permutations)
-        
+        print 'Running a total of {0} testcases.'.format(total)
         debug_cases = None #[6] #[116] # TODO JM: Debug code, remove
         for i in self.initials:
             for a,b in valid_perms:
@@ -262,12 +262,13 @@ class CommutativityTestSuite(object):
                     testcases.append(tc)
                     tc.expected = self.predictor.predict(tc)
                     if tc.expected is None:
-                      na += 1
                       if self.predictor.last_none_was_mod_as_add:
                         print 'Skipped MOD behaving as an ADD'
+                        skipped += 1
                       else:
                         print 'Skipped (N/A)'
                         print tc
+                        na += 1
                       continue
                     result,info_str = tc.evaluate()
                     tc.result = result
@@ -289,9 +290,9 @@ class CommutativityTestSuite(object):
                     else:
                         na += 1
                         print 'N/A. ' + info_str
-#                         print str(tc)
-        print 'Passed: {0}, Failed: {1} (imprecise: {2}, unsound: {3}), Skipped: {4} , Total testcases: {5}'.format(passed,failed,failed_imprecise,failed_unsound,na,total)
-        assert total == len(valid_perms) 
+                        print str(tc)
+        print 'Passed: {0}, Failed: {1} (imprecise: {2}, unsound: {3}), Skipped: {4}, N/A: {5}, Total testcases: {6}'.format(passed,failed,failed_imprecise,failed_unsound,skipped,na,total)
+        print 'Done!'
 
 
 class CommutativityPredictor(object):
