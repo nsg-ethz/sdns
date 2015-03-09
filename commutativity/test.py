@@ -290,7 +290,7 @@ class CommutativityTestSuite(object):
                         na += 1
                         print 'N/A. ' + info_str
 #                         print str(tc)
-        print 'Passed: {0}, Failed: {1} (imprecise: {2}, unsound: {3}), n/a: {4} , Total testcases: {5}'.format(passed,failed,failed_imprecise,failed_unsound,na,total)
+        print 'Passed: {0}, Failed: {1} (imprecise: {2}, unsound: {3}), Skipped: {4} , Total testcases: {5}'.format(passed,failed,failed_imprecise,failed_unsound,na,total)
         assert total == len(valid_perms) 
 
 
