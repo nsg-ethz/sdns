@@ -186,18 +186,20 @@ class MainApp(object):
             Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.0.0.0')),
             Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.0.0.1')),
             Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.0.1.0')),
-#             Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.0.2.0')),
-#             Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.1.0.0')),
+            Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.0.2.0')),
+            Command(Cmd.TRACE,FlowDescription('tcp,nw_dst=10.1.0.0')),
             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=0 actions=drop')),
             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.1 actions=output:1')),
-#             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/8 actions=output:2')),
+            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/8 actions=output:2')),
             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/24 actions=output:3')),
-#             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.1.0/24 actions=output:4')),
-#             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.2.0/24 actions=output:5')),
-#             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.1.0.0/16 actions=output:6')),
-#             Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/16 actions=output:7')),
+            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.1.0/24 actions=output:4')),
+            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.2.0/24 actions=output:5')),
+            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.1.0.0/16 actions=output:6')),
+            Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/16 actions=output:7')),
             Command(Cmd.OF_DEL,FlowDescription('table=0, tcp,nw_dst=10.0.0.1')),
             Command(Cmd.OF_DEL,FlowDescription('table=0, tcp,nw_dst=10.0.0.0/24')),
+            Command(Cmd.OF_MOD,FlowDescription('table=0, tcp,nw_dst=10.0.0.1 actions=output:6')),
+            Command(Cmd.OF_MOD,FlowDescription('table=0, tcp,nw_dst=10.0.0.0/24 actions=output:7')),
         ]
         initials_list = [
             [Command(Cmd.OF_ADD,FlowDescription('table=0, priority=0, tcp, actions=drop'))],
@@ -227,17 +229,30 @@ class CommutativityTestSuite(object):
 
     def evaluate_all(self):
         testcases = []
-        total = len(self.commands)*(len(self.commands)+1)/2*len(self.initials)
+        total_permutations = len(self.commands)*(len(self.commands)+1)/2*len(self.initials)
         caseno = 0
         passed = 0
         failed_imprecise = 0
         failed_unsound = 0
         failed = 0
         na = 0
-        debug_cases = None #[116] # TODO JM: Debug code, remove
-        print 'Running a total of {0} testcases'.format(total)
+        total = 0
+        
+        valid_types = [Cmd.TRACE, Cmd.OF_ADD, Cmd.OF_DEL, Cmd.OF_MOD]
+        
+        valid_perms = []
+        for i in itertools.combinations_with_replacement(self.commands,2):
+          if i[0].type in valid_types and i[1].type in valid_types:
+            total += 1
+            valid_perms.append(i)
+        
+        total = total * len(self.initials)
+        
+        print 'Running a total of {0} testcases out of {1} permutations'.format(total, total_permutations)
+        
+        debug_cases = None #[6] #[116] # TODO JM: Debug code, remove
         for i in self.initials:
-            for a,b in itertools.combinations_with_replacement(self.commands,2):
+            for a,b in valid_perms:
                 # (n+r-1)! / r! / (n-1)!, with r=2
                 # (n+1)! / 2 / (n-1)! = 1/2 * n(n+1)
                 caseno += 1
@@ -248,6 +263,12 @@ class CommutativityTestSuite(object):
                     tc.expected = self.predictor.predict(tc)
                     if tc.expected is None:
                       na += 1
+                      if self.predictor.last_none_was_mod_as_add:
+                        print 'Skipped MOD behaving as an ADD'
+                      else:
+                        print 'Skipped (N/A)'
+                        print tc
+                      continue
                     result,info_str = tc.evaluate()
                     tc.result = result
                     tc.info_str = info_str
@@ -269,8 +290,8 @@ class CommutativityTestSuite(object):
                         na += 1
                         print 'N/A. ' + info_str
 #                         print str(tc)
-        print 'Passed: {0}, Failed: {1} (imprecise: {2}, unsound: {3}), n/a: {4} , Total: {5}'.format(passed,failed,failed_imprecise,failed_unsound,na,total)
-        assert total == len(testcases) 
+        print 'Passed: {0}, Failed: {1} (imprecise: {2}, unsound: {3}), n/a: {4} , Total testcases: {5}'.format(passed,failed,failed_imprecise,failed_unsound,na,total)
+        assert total == len(valid_perms) 
 
 
 class CommutativityPredictor(object):
@@ -281,11 +302,13 @@ class CommutativityPredictor(object):
         """
         self.switch = switch
         self.comparator = comparator
+        self.last_none_was_mod_as_add = False
 
     def predict(self,testcase):
         """Apply commutativity rules
         :type testcase: CommutativityTestCase
         """
+        self.last_none_was_mod_as_add = False
         testcase.simulate()
         initial = testcase.initial
         
@@ -308,7 +331,7 @@ class CommutativityPredictor(object):
         ': :type yx_y: CommandResult'
         ': :type yx_dump: CommandResult'
         
-        if testcase.a > testcase.b or (
+        if testcase.a.type > testcase.b.type or (
                                        testcase.a == testcase.b and 
                                        hasattr(testcase.b, 'strict') and testcase.b.strict and 
                                        hasattr(testcase.a, 'strict') and not testcase.a.strict):
@@ -345,7 +368,7 @@ class CommutativityPredictor(object):
         # -----------
         #  p=priority, k=key/match, a=actions, r=return value
         #
-        
+               
         if x.type in (Cmd.RESET, Cmd.CLEAR) or y.type in (Cmd.RESET, Cmd.CLEAR):
             print "Unsupported case!"
             assert False # not supported!!
@@ -429,6 +452,40 @@ class CommutativityPredictor(object):
                 case2 = _trace_delete(x_retvals[1], y_retvals[1])
                 assert case1 == case2
                 return not case1
+              
+            if y.type == Cmd.OF_MOD:
+                # y is MOD
+                modify = y
+                Mpka = modify.flowdesc
+                Mp = modify.flowdesc.get_priority()
+                Mk = modify.flowdesc.get_match()
+                Ma = modify.flowdesc.get_actions()
+                
+                def _trace_modify(Tr,Mr):
+                  Tr_read = Tr
+                  is_add = Mr[0]
+                  if is_add:
+                    # uninteresting case, same as an add
+                    return None # not supported!! TODO: handle this better
+                  Mr_before_to_after = Mr[1]
+                  Mr_after_to_before = Mr[2]
+                  
+                  return (
+                          Tr_read in Mr_before_to_after is not None and Tr_read in Mr_before_to_after.keys() and
+                          Mr_before_to_after[Tr_read].get_actions() != Tr_read.get_actions()
+                          ) or (
+                           Tr_read in Mr_after_to_before is not None and Tr_read not in Mr_after_to_before.keys() and 
+                          Mr_after_to_before[Tr_read].get_actions() != Tr_read.get_actions()
+                          )
+                  
+                case1 = _trace_modify(x_retvals[0], y_retvals[0])
+                case2 = _trace_modify(x_retvals[1], y_retvals[1])
+                if case1 is None or case2 is None:
+                  self.last_none_was_mod_as_add = True
+                  return None
+                assert case1 == case2
+                return not case1      
+              
         if x.type == Cmd.OF_ADD:
           # x is ADD
           add = x
@@ -480,6 +537,139 @@ class CommutativityPredictor(object):
             case2 = _add_delete(x_retvals[1], y_retvals[1])
             assert case1 == case2
             return not case1
+          
+          if y.type == Cmd.OF_MOD:
+            # y is MOD
+            modify = y
+            Mpka = modify.flowdesc
+            Mp = modify.flowdesc.get_priority()
+            Mk = modify.flowdesc.get_match()
+            Ma = modify.flowdesc.get_actions()
+            
+            def _add_modify(Ar,Mr):
+              Ar_added = Ar[0]
+              Ar_before_matches = Ar[1]
+              
+              is_add = Mr[0]
+              if is_add:
+                # uninteresting case, same as an add
+                return None # not supported!! TODO: handle this better
+              Mr_before_to_after = Mr[1]
+              Mr_after_to_before = Mr[2]
+              
+              return (
+                       Mr_before_to_after is not None and Ar_added in Mr_before_to_after.keys() and
+                      Mr_before_to_after[Ar_added].get_actions() != Ar_added.get_actions()
+                      ) or (
+                       Mr_after_to_before is not None and Ar_added not in Mr_after_to_before.keys() and 
+                      Mr_after_to_before[Ar_added].get_actions() != Ar_added.get_actions()
+                      )
+              
+            case1 = _add_modify(x_retvals[0], y_retvals[0])
+            case2 = _add_modify(x_retvals[1], y_retvals[1])
+            if case1 is None or case2 is None:
+              self.last_none_was_mod_as_add = True
+              return None
+            assert case1 == case2
+            return not case1   
+              
+        if x.type == Cmd.OF_DEL:
+          if y.type == Cmd.OF_DEL:
+            return True
+          
+          if y.type == Cmd.OF_MOD:
+            # y is MOD
+            modify = y
+            Mpka = modify.flowdesc
+            Mp = modify.flowdesc.get_priority()
+            Mk = modify.flowdesc.get_match()
+            Ma = modify.flowdesc.get_actions()
+            
+            def _del_modify(Dr,Mr):
+              Dr_deleted = Dr[0]
+              Dr_aftermatches = Dr[1]
+              is_add = Mr[0]
+              if is_add:
+                # uninteresting case, same as an add
+                return None # not supported!! TODO: handle this better
+              Mr_before_to_after = Mr[1]
+              Mr_after_to_before = Mr[2]
+              
+              # TODO JM: Do (out_port) is NOT handled
+              # TODO JM: is_strict is NOT handled
+              
+              return True
+              
+            case1 = _del_modify(x_retvals[0], y_retvals[0])
+            case2 = _del_modify(x_retvals[1], y_retvals[1])
+            if case1 is None or case2 is None:
+              self.last_none_was_mod_as_add = True
+              return None
+            assert case1 == case2
+            return not case1
+          
+        if x.type == Cmd.OF_MOD:
+          # x is MOD
+          modify = x
+          Mpka = modify.flowdesc
+          Mp = modify.flowdesc.get_priority()
+          Mk = modify.flowdesc.get_match()
+          Ma = modify.flowdesc.get_actions()
+          if y.type == Cmd.OF_MOD:
+            # y is MOD
+            modify2 = y
+            M2pka = modify2.flowdesc
+            M2p = modify2.flowdesc.get_priority()
+            M2k = modify2.flowdesc.get_match()
+            M2a = modify2.flowdesc.get_actions()
+            
+            def _modify_modify(Mr,Mr2):
+              is_add = Mr[0]
+              is_add2 = Mr2[0]
+              if is_add or is_add2:
+                # uninteresting case, same as an add
+                return None # not supported!! TODO: handle this better
+              Mr_before_to_after = Mr[1]
+              Mr_after_to_before = Mr[2]
+              Mr2_before_to_after = Mr2[1]
+              Mr2_after_to_before = Mr2[2]
+              
+              if Mr_before_to_after is None:
+                Mr_before_to_after = []
+              if Mr_after_to_before is None:
+                Mr_after_to_before = []
+              if Mr2_before_to_after is None:
+                Mr2_before_to_after = []
+              if Mr2_after_to_before is None:
+                Mr2_after_to_before = []
+                
+              before1 = set(Mr_before_to_after.keys()) 
+              before2 = set(Mr2_before_to_after.keys())
+              after1 = set(Mr_after_to_before.keys())
+              after2 = set(Mr2_after_to_before.keys())
+              
+              if len(after1.intersection(before2)) > 0:
+                return False
+              if len(after2.intersection(before1)) > 0:
+                return False
+              return True
+              
+            case1 = _modify_modify(x_retvals[0], y_retvals[0])
+            case2 = _modify_modify(x_retvals[1], y_retvals[1])
+            if case1 is None or case2 is None:
+              self.last_none_was_mod_as_add = True
+              return None
+            assert case1 == case2
+            return not case1
+
+        # NOTE:
+        #       with the new rule the rest of the testcases are trivial, 
+        #       as we would just do the same or similar comparison as is done in:
+        #       CommutativityTestCase.evaluate. There is nothing to gain 
+        #       as we cannot predict anything without the information in
+        #       the return values.
+        #       The remaining combinations are very similar to add_modify.
+        #
             
                 
 class IntersectionNonEmptyTestCase(object):
@@ -870,10 +1060,12 @@ class CommandResult(object):
           add_retvals = self._retval_of_add(comparator) 
           return (is_add, add_retvals)
         else:
-          for x in self.before_to_after:
-            x.remove_statistics()
-          for x in self.after_to_before:
-            x.remove_statistics()
+          if self.before_to_after is not None:
+            for x in self.before_to_after.keys():
+              x.remove_statistics()
+          if self.after_to_before is not None:
+            for x in self.after_to_before.keys():
+              x.remove_statistics()
           return (is_add, self.before_to_after, self.after_to_before)
     def _retval_of_bar(self,comparator):
         # No return value
@@ -1026,9 +1218,9 @@ class OvsSwitch(object):
         if cmd.strict:
             lines = run_cmdline_string('ovs-ofctl --strict mod-flows '+self.switchdesc.name+' "'+str(cmd.flowdesc)+'"',noerr=True)
         else:
-            f = FlowDescription(cmd.flowdesc)
+            f = FlowDescription(str(cmd.flowdesc))
             f.remove_priority()
-            lines = run_cmdline_string('ovs-ofctl mod-flows '+self.switchdesc.name+' "'+str(f)+'"',noerror=True)
+            lines = run_cmdline_string('ovs-ofctl mod-flows '+self.switchdesc.name+' "'+str(f)+'"',noerr=True)
         result = CommandResult(cmd)
         if len(lines) > 0:
             l = lines[0].strip()
