@@ -5,7 +5,6 @@ Created on Jan 29, 2015
 '''
 
 import abc
-from enum.enum import __new__
 
 class Event(object):
   def __init__(self):
@@ -30,7 +29,7 @@ class EventMixinMetaclass(type):
   def __new__(cls, name, bases, attrs):
     _eventMixin_events = set(attrs.get('_eventMixin_events', list()))
     for base in bases:
-        _eventMixin_events.update(base.__dict__.get('_eventMixin_events', list()))
+      _eventMixin_events.update(getattr(base,'_eventMixin_events', list()))
     attrs['_eventMixin_events'] = _eventMixin_events
     return type.__new__(cls, name, bases, attrs)
   
@@ -38,7 +37,7 @@ class AbstractEventMixinMetaclass(abc.ABCMeta):
   def __new__(cls, name, bases, attrs):
     _eventMixin_events = set(attrs.get('_eventMixin_events', list()))
     for base in bases:
-        _eventMixin_events.update(base.__dict__.get('_eventMixin_events', list()))
+      _eventMixin_events.update(getattr(base,'_eventMixin_events', list()))
     attrs['_eventMixin_events'] = _eventMixin_events
     return abc.ABCMeta.__new__(cls, name, bases, attrs)
 
