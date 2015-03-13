@@ -1,0 +1,26 @@
+digraph G {
+77 [label="77\nHbMessageHandle\nOFPT_BARRIER_REQUEST\n"] ;
+79 [label="79\nHbMessageSend\nOFPT_BARRIER_REPLY\n"] ;
+81 [label="81\nHbHostSend\n"];
+83 [label="83\nHbPacketHandle\nFlowTableRead"][shape=box];
+87 [label="87\nHbMessageSend\nOFPT_PACKET_IN\n"] ;
+91 [label="91\nHbMessageHandle\nOFPT_FLOW_MOD\nFlowTableWrite"] [shape=box];
+96 [label="96\nHbMessageHandle\nOFPT_PACKET_OUT\n"] ;
+101 [label="101\nHbPacketSend\n"];
+104 [label="104\nHbControllerHandle\n"];
+105 [label="105\nHbControllerSend\n"];
+106 [label="106\nHbControllerHandle\n"];
+107 [label="107\nHbControllerSend\n"];
+109 [label="109\nHbPacketHandle\nFlowTableRead"][shape=box];
+    105 -> 91;
+    81 -> 83;
+    101 -> 109;
+    106 -> 107;
+    107 -> 96;
+    96 -> 101;
+    104 -> 105;
+    87 -> 104;
+    83 -> 87;
+    87 -> 106;
+    77 -> 79;
+}

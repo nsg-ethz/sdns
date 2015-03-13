@@ -1,0 +1,9 @@
+Using file /home/jeremie/Desktop/hb_test_1to5.json
+Read in 13 events.
+91: HbMessageHandle (Flow table write)
+83: HbPacketHandle (Flow table read)
+109: HbPacketHandle (Flow table read)
+Commute (r/w): 109 <---> 91
+Table operations:    3
+Total races:         1
+Total harmful races: 0
