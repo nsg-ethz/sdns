@@ -29,6 +29,15 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "pox"))
 #
 #
 
+# From STS:
+# barrier_deque has the structure: [(None, queue_1), (barrier_request_1, queue_2), ...] where...
+#   - its elements have the form (barrier_in_request, next_queue_to_use)
+#   - commands are always processed from the queue of the first element (i.e. barrier_deque[0][1])
+#   - when a new barrier_in request is received, a new tuple is appended to barrier_deque, containing:
+#   (<the just-received request>, <queue for subsequent non-barrier_in commands until all previous commands have been processed>)
+#   - the very first barrier_in is None because, there is no request to respond when we first start buffering commands
+#     self.barrier_deque = [(None, Queue.PriorityQueue())]
+
 
 
 def enum(*sequential, **named):
@@ -44,8 +53,8 @@ def enum(*sequential, **named):
     enums['values'] = values
     return type('Enum', (), enums)
 
-EventType = enum('TracePacketRegister',
-                 'TracePacketDeregister',
+EventType = enum('TraceTagPacket',
+                 'TraceUntagPacket',
                  'TraceDpPacketOutHost', 
                  'TraceDpPacketOutSwitch', 
                  'TraceDpPacketInHost', 
@@ -62,15 +71,15 @@ EventType = enum('TracePacketRegister',
                  'TraceOfMessageFromController', 
                  'TraceFlowTableModificationBefore',  # TODO JM: fix
                  'TraceFlowTableModificationAfter',  # TODO JM: fix
-                 'TraceFlowTableModificationExpired', 
-                 'TraceFlowTableMatch', 
-                 'TraceFlowTableTouch', 
+                 'TraceFlowTableRuleExpiration', 
+                 'TraceFlowTableRuleMatch', 
+                 'TraceFlowTableRuleTouch', 
                  'TracePacketActionModificationBegin', 
                  'TracePacketActionModificationEnd', 
                  'TracePacketActionOutput', 
                  'TracePacketActionResubmit', 
                  'TracePacketBufferReadPacket', 
-                 'TracePacketBufferError', 
+                 'TracePacketBufferReadError', 
                  'TracePacketBufferWritePacket',
                  'TracePacketBufferFlushPacket')
 
@@ -104,12 +113,12 @@ MsgType = enum(
 
 DpPacketInTypes = [EventType.TraceDpPacketInHost, EventType.TraceDpPacketInSwitch]
 DpPacketOutTypes = [EventType.TraceDpPacketOutHost, EventType.TraceDpPacketOutSwitch]
-PacketBufferReadTypes = [EventType.TracePacketBufferReadPacket, EventType.TracePacketBufferError]
+PacketBufferReadTypes = [EventType.TracePacketBufferReadPacket, EventType.TracePacketBufferReadError]
 PacketBufferWriteTypes = [EventType.TracePacketBufferWritePacket, EventType.TracePacketBufferFlushPacket]
 
 # helper, used 3 times in dict below
 internal_switch_predecessor_types = [# external calls
-                                     EventType.TraceFlowTableTouch,
+                                     EventType.TraceFlowTableRuleTouch,
                                      EventType.TraceOfHandlePacketOutFromRaw,
                                      EventType.TracePacketBufferReadPacket,
                                      # internal 
@@ -120,9 +129,9 @@ internal_switch_predecessor_types = [# external calls
                                      ]
 # mapping of events -> possible predecessor types.
 predecessor_types = {
-    EventType.TracePacketRegister:                [], # (special case, handled separately)
+    EventType.TraceTagPacket:                [], # (special case, handled separately)
                                                       # is not added to happens-before graph
-    EventType.TracePacketDeregister:              [], # (special case, handled separately)
+    EventType.TraceUntagPacket:              [], # (special case, handled separately)
                                                       # is not added to happens-before graph
     
     EventType.TraceDpPacketOutHost:               [EventType.TracePacketHostResponseEnd], # tag
@@ -151,9 +160,9 @@ predecessor_types = {
     EventType.TraceOfMessageFromController:       [EventType.TraceOfMessageToController], # as determined by OfHandleVendorHb
     
     EventType.TraceFlowTableModification:         [EventType.TraceOfMessageFromController], # msg
-    EventType.TraceFlowTableModificationExpired:  [], # (unused)
-    EventType.TraceFlowTableMatch:                [EventType.TraceDpPacketInSwitch], # tag
-    EventType.TraceFlowTableTouch:                [EventType.TraceFlowTableMatch], # tag
+    EventType.TraceFlowTableRuleExpiration:  [], # (unused)
+    EventType.TraceFlowTableRuleMatch:                [EventType.TraceDpPacketInSwitch], # tag
+    EventType.TraceFlowTableRuleTouch:                [EventType.TraceFlowTableRuleMatch], # tag
     
     EventType.TracePacketActionModificationBegin: internal_switch_predecessor_types, # tag
     EventType.TracePacketActionModificationEnd:   [EventType.TracePacketActionModificationBegin], # precursor_id
@@ -163,7 +172,7 @@ predecessor_types = {
     # For packet buffers: no edges between read/writes on same switch, as that would circumvent the controller
     EventType.TracePacketBufferReadPacket:        [EventType.TraceOfHandleFlowModFromBuffer, # dpid+buffer_id
                                                    EventType.TraceOfHandlePacketOutFromBuffer], # dpid+buffer_id
-    EventType.TracePacketBufferError:             [EventType.TraceOfHandleFlowModFromBuffer, # dpid+buffer_id
+    EventType.TracePacketBufferReadError:             [EventType.TraceOfHandleFlowModFromBuffer, # dpid+buffer_id
                                                    EventType.TraceOfHandlePacketOutFromBuffer], # dpid+buffer_id
     
     EventType.TracePacketBufferWritePacket:       [EventType.TraceDpPacketInSwitch, # tag
@@ -171,62 +180,6 @@ predecessor_types = {
     EventType.TracePacketBufferFlushPacket:       internal_switch_predecessor_types # tag
 }
 
-class ObjectRegistry(object):
-  """
-  Keeps track of objects using persistent tags. Multiple objects can have the same
-  tag if they represent the same logical object.
-  """
-  _tag_count = itertools.count(1)
-  
-  def __init__(self):
-    self.tags = dict() # obj -> tag
-    self.objs = defaultdict(set) # tag -> obj
-    self.refcount = defaultdict(int)
-    
-  def register(self, obj, tag=None):
-    '''
-    Register an object, optionally with an already existing tag. Returns the tag.
-    '''
-    # The obj must not already be present with a different tag
-    assert obj is not None
-    assert (tag is None) or (
-                             tag in self.objs and 
-                             (obj not in self.tags or self.tags[obj] == tag)
-                             )
-    
-    if obj in self.tags:
-      tag = self.tags[obj]
-    
-    if tag is None:
-      tag = self._tag_count.next()
-    
-    self.tags[obj] = tag
-    self.objs[tag].add(obj)
-    self.refcount[tag] += 1
-
-    return tag
-  
-  def deregister(self, obj):
-    assert obj is not None
-    
-    if obj in self.tags:
-      assert obj in self.tags and obj in self.objs[self.tags[obj]]
-      
-      tag = self.tags[obj]
-      
-      assert self.refcount[tag] > 0
-      self.refcount[tag] -= 1
-      
-      # remove tag
-      if self.refcount[tag] == 0:
-        for obj in self.objs[tag]:
-          assert self.tags[obj] == tag
-          del self.tags[obj]
-        del self.objs[tag]
-  
-  def lookup(self, obj):
-    assert obj is not None
-    return self.tags[obj]
 
 class HappensBeforeGraph(object):
   def __init__(self):
@@ -552,8 +505,8 @@ class HappensBeforeGraph(object):
       types_use_tag = [EventType.TraceDpPacketOutSwitch,
                         EventType.TraceDpPacketInSwitch,
                         EventType.TraceOfGeneratePacketIn,
-                        EventType.TraceFlowTableMatch,
-                        EventType.TraceFlowTableTouch,
+                        EventType.TraceFlowTableRuleMatch,
+                        EventType.TraceFlowTableRuleTouch,
                         EventType.TracePacketActionModificationBegin,
                         EventType.TracePacketActionModificationEnd,
                         EventType.TracePacketActionOutput,
@@ -568,7 +521,7 @@ class HappensBeforeGraph(object):
                        EventType.TraceFlowTableModification]
       
       types_use_bufferid = [EventType.TracePacketBufferReadPacket,
-                            EventType.TracePacketBufferError]
+                            EventType.TracePacketBufferReadError]
       
       if ev.type in types_use_tag:
         if ev in packet_tags:
@@ -769,7 +722,7 @@ class HappensBeforeGraph(object):
     # Event types
     #
     
-    def _case_TracePacketRegister(ev):
+    def _case_TraceTagPacket(ev):
       """
       Special case: Not used for happens-before, but merely to generate
       auxiliary packet information (packet_tags).
@@ -788,9 +741,9 @@ class HappensBeforeGraph(object):
       tag = registry.register(obj, tag)
       packet_tags[ev] = tag
       
-    def _case_TracePacketDeregister(ev):
+    def _case_TraceUntagPacket(ev):
       """
-      See _case_TracePacketRegister
+      See _case_TraceTagPacket
       """
       obj = ev.packet_obj_id # may be None
       reg_event_id = ev.packet_register_event_id # may be None
@@ -895,12 +848,12 @@ class HappensBeforeGraph(object):
     def _case_TraceFlowTableModification(ev):
       _check_rule_01(ev)
       _latest_events_add(ev)
-    def _case_TraceFlowTableModificationExpired(ev):
+    def _case_TraceFlowTableRuleExpiration(ev):
       pass # not used
-    def _case_TraceFlowTableMatch(ev):
+    def _case_TraceFlowTableRuleMatch(ev):
       _check_rule_01(ev)
       _latest_events_add(ev)               
-    def _case_TraceFlowTableTouch(ev):
+    def _case_TraceFlowTableRuleTouch(ev):
       _check_rule_01(ev)
       _latest_events_add(ev)
     def _case_TracePacketActionModificationBegin(ev):
@@ -918,7 +871,7 @@ class HappensBeforeGraph(object):
     def _case_TracePacketBufferReadPacket(ev):
       _check_rule_01(ev)
       _latest_events_add(ev)       
-    def _case_TracePacketBufferError(ev):
+    def _case_TracePacketBufferReadError(ev):
       _check_rule_01(ev)
       _latest_events_add(ev)        
     def _case_TracePacketBufferWritePacket(ev):
@@ -931,8 +884,8 @@ class HappensBeforeGraph(object):
       pass
     
     cases = {
-        EventType.TracePacketRegister:                _case_TracePacketRegister,
-        EventType.TracePacketDeregister:              _case_TracePacketDeregister,
+        EventType.TraceTagPacket:                _case_TraceTagPacket,
+        EventType.TraceUntagPacket:              _case_TraceUntagPacket,
         EventType.TraceDpPacketOutHost:               _case_TraceDpPacketOutHost,
         EventType.TraceDpPacketOutSwitch:             _case_TraceDpPacketOutSwitch,
         EventType.TraceDpPacketInHost:                _case_TraceDpPacketInHost,
@@ -947,22 +900,22 @@ class HappensBeforeGraph(object):
         EventType.TraceOfMessageToController:         _case_TraceOfMessageToController,
         EventType.TraceOfMessageFromController:       _case_TraceOfMessageFromController,
         EventType.TraceFlowTableModification:         _case_TraceFlowTableModification,
-        EventType.TraceFlowTableModificationExpired:  _case_TraceFlowTableModificationExpired,
-        EventType.TraceFlowTableMatch:                _case_TraceFlowTableMatch,
-        EventType.TraceFlowTableTouch:                _case_TraceFlowTableTouch,
+        EventType.TraceFlowTableRuleExpiration:  _case_TraceFlowTableRuleExpiration,
+        EventType.TraceFlowTableRuleMatch:                _case_TraceFlowTableRuleMatch,
+        EventType.TraceFlowTableRuleTouch:                _case_TraceFlowTableRuleTouch,
         EventType.TracePacketActionModificationBegin: _case_TracePacketActionModificationBegin,
         EventType.TracePacketActionModificationEnd:   _case_TracePacketActionModificationEnd,
         EventType.TracePacketActionOutput:            _case_TracePacketActionOutput,
         EventType.TracePacketActionResubmit:          _case_TracePacketActionResubmit,
         EventType.TracePacketBufferReadPacket:        _case_TracePacketBufferReadPacket,
-        EventType.TracePacketBufferError:             _case_TracePacketBufferError,
+        EventType.TracePacketBufferReadError:             _case_TracePacketBufferReadError,
         EventType.TracePacketBufferWritePacket:       _case_TracePacketBufferWritePacket,
         EventType.TracePacketBufferFlushPacket:        _case_TracePacketBufferFlushPacket
     }
     
     for ev in self.events:
       # run case
-      if ev.type not in [EventType.TracePacketRegister, EventType.TracePacketDeregister]:
+      if ev.type not in [EventType.TraceTagPacket, EventType.TraceUntagPacket]:
         #update tags
         if hasattr(ev, 'packet_register_event_id'):
           reg_event = self.events_by_id[ev.packet_register_event_id]
@@ -978,8 +931,8 @@ class HappensBeforeGraph(object):
     edges = 0
     dot_lines.append("digraph G {\n");
     for i in self.events:
-      if i.type not in [EventType.TracePacketRegister, 
-                        EventType.TracePacketDeregister,
+      if i.type not in [EventType.TraceTagPacket, 
+                        EventType.TraceUntagPacket,
                         EventType.OfHandleVendorHb]:
         try:
           dot_lines.append('{0} [label="{0}\\n{1}\\n{2}"];\n'.format(i.id,EventType.keys()[i.type],MsgType.keys()[i.msg_type]))
@@ -1017,410 +970,3 @@ if __name__ == '__main__':
     main = Main(sys.argv[1])
     main.run()
     
-#   def _successors(self):
-#     '''
-#     Invert dict containing multiple values
-#     Same as this one-liner:
-#     return reduce(lambda x, (k,v): x[k].add(v) or x, [(v,k) for k in s for v in s[k]], defaultdict(set))
-#     '''
-#     successors = defaultdict(set)
-#     for k,v in self.precursors.iteritems():
-#       for i in v:
-#         successors[i] = k
-#     return successors
-#
-#   def tag_packets(self):
-#     '''
-#     Tag packets. This adds a packet_tag field to each event that contains a packet.
-#     All packets with the same tag are guaranteed to represent the same packet,
-#     even if the contents are different (e.g. the packet was modified on a switch,
-#     but the tag stays the same).
-#     Identical packets may have different tags. If they have separate tags then they
-#     do not represent the same packet. 
-#     '''
-#     registry = PacketRegistry()
-#     
-#     def _case_TracePacketRegister(ev):
-#       obj = ev.packet_obj_id
-#       reg_event_id = ev.packet_register_event_id
-#       
-#       tag = None
-#       if reg_event_id is not None:
-#         # we are replacing an already existing object, lookup the original object
-#         # reg_event_id is an event id
-#         reg_event = self.events_by_id[reg_event_id]
-#         reg_obj = reg_event.packet_obj_id
-#         tag = registry.lookup(reg_obj)
-#       
-#       registry.register(obj, tag)
-#       
-#     def _case_TracePacketDeregister(ev):
-#       obj = ev.packet_obj_id # may be None
-#       reg_event_id = ev.packet_register_event_id # may be None
-#       assert (obj is not None) or (reg_event_id is not None)
-#       
-#       if reg_event_id is not None:
-#         reg_event = self.events_by_id[reg_event_id]
-#         reg_obj = reg_event.packet_obj_id
-#         assert (obj is None or obj == reg_obj)
-#         obj = reg_obj
-# 
-#       registry.deregister(obj)
-#       
-#     def _case_default(ev):
-#       if hasattr(ev, 'packet'):
-#         assert hasattr(ev, 'packet_register_event_id')
-#         assert hasattr(ev, 'packet_tag')
-#         reg_event_id = ev.packet_register_event_id
-#         reg_event = self.events_by_id[reg_event_id]
-#         reg_obj = reg_event.packet_obj_id
-#         tag = registry.lookup(reg_obj)
-#         ev.packet_tag = tag
-#     
-#     cases = {
-#         EventType.TracePacketRegister:   _case_TracePacketRegister,
-#         EventType.TracePacketDeregister: _case_TracePacketDeregister
-#     }
-#     
-#     for ev in self.event_list:
-#       cases.get(ev.type, _case_default)(ev)
-#       
-#   def update_edges(self):
-#     '''
-#     An event belongs to the same group if:
-#     - It is transmitted over the wire:
-#        * There is an Out event from a port A connected to port B.
-#        * There is an In event from a port B that is connected to port A.
-#        * The packet bytes are identical
-#        * The In event occurs after the out event in the trace
-#     or
-#     - It is modified inside a switch:
-#        * There is a Begin/End packet modification event pair.
-#     (- A response is generated by a host:
-#        * There is a Begin/End packet response event pair.) -> not implemented yet (TODO JM: implement)
-#     
-#     Note: Identical packets (raw bytes identical) cannot be distinguished from each other. Although something like a unique
-#           tag would be necessary to distinguish identical packets, it does NOT matter for the happens-before relationship IF
-#           we use the topology information to verify that the packet took a path that lead to the place where it was modified.
-#           Furthermore, for identical packets traveling on the same wire at the same time, it does *NOT* matter which one we
-#           assign to which happens-before list (as they are identical, and packets are theoretically allowed to overtake other 
-#           packets on the wire.
-#     Note: In general, the STS PatchPanel and the SoftwareSwitch function like FIFO queues for the most part, but that is not
-#           a guarantee so we should not rely on it.
-#     '''
-#     events = dict()
-#     for i in self.event_list:
-#       events[i.id] = i
-#       
-#     self.precursors = defaultdict(set) # happens-before: maps events -> immediate precursor events
-#     self.successors = defaultdict(set) # happens-before: maps events -> immediate successor events
-# 
-#     def _add_precursor(self, event, precursor):
-#       self.precursors[k] = precursor
-#       self.successors[precursor] = k
-#     
-#     # events containing dataplane packets "on the wire"
-#     dp_out_forwarded = defaultdict(set) # (from, to, packet) -> set()
-#     dp_out_resubmitted = defaultdict(set) # (dpid, port, packet)
-#     
-#     # events containing dataplane packets received by the switch, but not yet processed
-#     dp_in_forwarded = defaultdict(set) # (dpid,port,packet) -> set()
-#     dp_in_resubmitted = defaultdict(set) # (dpid, port, packet)
-# 
-#     # messages received by the switch, but not yet processed
-#     # this can never contain a barrier request
-#     of_in_received = defaultdict(set) # (dpid) -> set
-#     
-#     internal_matched = defaultdict(set) # (dpid, port, packet)
-#     internal_touched = defaultdict(set) # (dpid, port, packet)
-#     internal_buffer_read = defaultdict(set) # (dpid, port, packet)
-#     internal_buffer_write = defaultdict(set) # (dpid, port, packet)
-#     internal_output = defaultdict(set) # (dpid, packet)
-#     
-#     latest_barrier_request = dict()
-#     latest_barrier_reply = dict()
-# #     latest_unordered_msgs = defaultdict(set) # everything between barriers
-#     
-#     # heuristics
-#     most_recent_dp_in_host = dict() # (node,port)
-#     most_recent_of_packet_in = dict() # (dpid,cid)
-#     
-#     def generic_patch_panel_in(i):
-#       assert i.is_connected
-#       from_tag = (i.connected_is_switch, i.connected_node, i.connected_port)
-#       to_tag = (i.is_switch, i.node, i.port)
-#       tag = (from_tag, to_tag, i.packet) # packet is important here
-#       out_event = dp_out_forwarded[tag].pop(); # they are indistinguishable
-#       self.precursors[i].add(out_event) # TraceDpPacketOutHost, TraceDpPacketOutSwitch
-#       
-#     def generic_patch_panel_out(i):
-#       assert i.is_connected
-#       from_tag = (i.is_switch, i.node, i.port)
-#       to_tag = (i.connected_is_switch, i.connected_node, i.connected_port)
-#       tag = (from_tag, to_tag, i.packet) # packet is important here
-#       dp_out_forwarded[tag].add(i)
-# 
-#     for idx, i in enumerate(self.event_list):
-#       
-#       if i.type == EventType.TraceDpPacketInHost:
-#         location = (i.node, i.port)
-#         if i.is_connected:
-#           generic_patch_panel_in(i)
-#         most_recent_dp_in_host[location] = i
-#         
-#         
-#         
-#       
-#       if i.type == EventType.TraceDpPacketOutHost:
-#         location = (i.node, i.port)
-#         if i.is_connected:
-#           generic_patch_panel_out(i)
-#         if location in most_recent_dp_in_host:
-#           self.precursors[i].add(most_recent_dp_in_host[location])
-#           
-#           
-#           
-#       
-#       if i.type == EventType.TracePacketHostResponseBegin:
-#         pass # TODO JM implement     
-#       
-#       
-#       
-#          
-#       if i.type == EventType.TracePacketHostResponseEnd:
-#         pass # TODO JM implement
-#       
-#       
-#            
-#       
-#       if i.type == EventType.TraceDpPacketInSwitch:
-#         tag = (i.dpid, i.port, i.packet)
-#         try:
-#           resubmit_event = dp_out_resubmitted[tag].pop()
-#           self.precursors[i].add(resubmit_event)
-#           dp_in_resubmitted[tag].add(i)
-#         except KeyError:
-#           # nothing was resubmitted
-#           if i.is_connected:
-#             generic_patch_panel_in(i)
-#             dp_in_forwarded[tag].add(i)
-#             
-#       
-#       if i.type == EventType.TraceDpPacketOutSwitch:
-#         tag = (i.dpid, i.packet)
-#         if i.is_connected:
-#           generic_patch_panel_out(i)
-#         
-# #         selected = internal_output[tag].pop()
-# #         self.precursors[i].add(selected)
-# #         
-# #         for k in reversed(self.event_list[:idx]): # TODO JM: inefficient, refactor
-# #           if k.type == EventType.TracePacketActionOutput and \
-# #             k.dpid == i.dpid and \
-# #             k.packet == i.packet:
-# #             self.precursors[i].add(k)
-# #             break; # only use latest # TODO JM: Remove all "lookback" style HB rules.
-#           
-#      
-#       # Openflow messages
-#       if i.type == EventType.TraceOfMessageToController:
-#         location = (i.dpid, i.cid)
-#         if i.msg_type == MsgType.OFPT_PACKET_IN:
-#           most_recent_of_packet_in[location] = i;
-#           # check buffer
-#           for k in reversed(self.event_list[:idx]): # TODO JM: inefficient, refactor
-#             if k.type == EventType.TracePacketBufferWritePacket and \
-#               k.dpid == i.dpid and \
-#               k.buffer_id == i.buffer_id:
-#               self.precursors[i].add(k)
-#               break; # only use latest # TODO JM: Remove all "lookback" style HB rules.
-#             
-#             
-#             
-#             
-#         
-#       if i.type == EventType.TraceOfMessageFromController:
-# #         location = (i.dpid, i.cid) #TODO JM
-#         location = (i.dpid)
-#         
-#         if location in latest_barrier_request:
-#           self.precursors[i].add(latest_barrier_request[location]) 
-#         
-#         if i.msg_type in (MsgType.OFPT_PACKET_OUT, MsgType.OFPT_FLOW_MOD):
-#           if location in most_recent_of_packet_in:
-#             self.precursors[i].add(most_recent_of_packet_in[location]) # TODO JM: deeply flawed, fix this
-#         
-#         if i.msg_type == MsgType.OFPT_BARRIER_REQUEST:
-#           latest_barrier_request[location] = i
-#           for k in of_in_received[location]:
-#             self.precursors[i].add(k) # everything before this barrier
-#           of_in_received[location].clear()
-#         else:
-#           of_in_received[location].add(i)
-#           
-#           
-#         
-#       if i.type == EventType.TraceFlowTableModificationBefore:
-#         location = (i.dpid)
-#         
-#         for k in reversed(self.event_list[:idx]): # TODO JM: inefficient, refactor
-#             if k.type == EventType.TraceOfMessageFromController and \
-#               k.msg_type == MsgType.OFPT_FLOW_MOD and \
-#               k.dpid == i.dpid:
-#               self.precursors[i].add(k)
-#               break; # only use latest # TODO JM: Remove all "lookback" style HB rules.
-#             
-#         # TODO JM: This is wrong: We need to match on FLOW_MOD as well, i.e. actually read the contents
-#         #          of the OF packet and then readout the flow mod message to compare.
-#         #          
-#         #          Use the one that has the same FLOW MOD in queued_incoming_messages before the current barrier
-#         
-#         
-#         # NOTE: CAN COMPARE TraceFlowTableModificationBefore.flow_mod with TraceOfMessageFromController.msg
-#         
-#         
-#         
-#         
-#       if i.type == EventType.TraceFlowTableModificationAfter:
-#         location = (i.dpid)
-#         begin_event = events[i.precursor_id]
-#         self.precursors[i].add(begin_event) # TraceFlowTableModificationBefore
-#         
-#         
-# #       if i.type == EventType.TraceFlowTableModificationExpired:
-# #         pass # TODO JM implement    
-# #       
-#       
-#         
-#       if i.type == EventType.TraceFlowTableMatch:
-#         location = (i.dpid)
-#         tag = (i.dpid, i.in_port, i.packet)
-#         
-#         try:
-#           selected = dp_in_resubmitted[tag].pop()
-#           self.precursors[i].add(selected)
-#           internal_matched[(tag, i.actions)].add(i)
-#         except KeyError:
-#           # nothing was resubmitted
-#           selected = dp_in_forwarded[tag].pop()
-#           self.precursors[i].add(selected)
-#           internal_matched[(tag, i.actions)].add(i)
-#         
-#         
-#       if i.type == EventType.TraceFlowTableTouch:
-#         location = (i.dpid)
-#         tag = (i.dpid, i.in_port, i.packet)
-#         
-#         selected = internal_matched[(tag, i.actions)].pop()
-#         self.precursors[i].add(selected)
-#         
-#         internal_touched[(tag, i.actions)].add(i)
-#         
-#         
-#         
-# #       if i.type == EventType.TracePacketActionModificationBegin:
-# #         location = (i.dpid)
-# #         tag = (i.dpid, i.in_port, i.packet)
-# #         
-# #         # the order here should not really matter
-# #         try:
-# #           #TraceFlowTableTouch
-# #           selected = internal_touched[(tag, i.actions)].pop()
-# #           self.precursors[i].add(selected)
-# #         except KeyError:
-# #           # TracePacketBufferReadPacket
-# #           selected = internal_buffer_read[(tag, i.actions)]
-# #           self.precursors[i].add(selected)
-# #           
-# #           
-# #       if i.type == EventType.TracePacketActionModificationEnd:
-# #         begin_event = events[i.precursor_id]
-# #         self.precursors[i].add(begin_event) # TracePacketActionModificationBegin
-# #         
-# #         tag = (i.dpid, i.in_port, i.packet)
-# #         
-# #         for (k_tag, k_actions) in internal_touched.keys():
-# #           if k_tag == tag and k_actions == i.actions:
-# #             internal_touched[]
-#             
-#           
-#         
-#         
-#       if i.type == EventType.TracePacketActionOutput:
-#         location = (i.dpid)
-#         tag = (i.dpid, i.in_port, i.packet)
-#         
-#         # the order here should not really matter
-#         try:
-#           #TraceFlowTableTouch
-#           selected = internal_touched[(tag, i.actions)].pop()
-#           self.precursors[i].add(selected)
-#         except KeyError:
-#           # TracePacketBufferReadPacket
-#           selected = internal_buffer_read[(tag, i.actions)].pop()
-#           self.precursors[i].add(selected)
-# 
-#         internal_output[(i.dpid, i.output_port, i.packet)].add(i)
-# 
-# 
-#       if i.type == EventType.TracePacketActionResubmit:
-#         location = (i.dpid)
-#         tag = (i.dpid, i.in_port, i.packet)
-#         
-#         # the order here should not really matter
-#         try:
-#           #TraceFlowTableTouch
-#           selected = internal_touched[(tag, i.actions)].pop()
-#           self.precursors[i].add(selected)
-#         except KeyError:
-#           # TracePacketBufferReadPacket
-#           selected = internal_buffer_read[(tag, i.actions)]
-#           self.precursors[i].add(selected)
-# 
-#         dp_out_resubmitted[tag].add(i)
-# 
-#         
-#       if i.type == EventType.TracePacketBufferReadPacket:
-#         location = (i.dpid)
-#         tag = (i.dpid, i.in_port, i.packet)
-#         
-#         selected_dp = internal_buffer_write[(tag, i.buffer_id)].pop()
-#         self.precursors[i].add(selected_dp)
-#         
-#         candidates = filter(lambda x: x.buffer_id == i.buffer_id and x.actions == i.actions, of_in_received[location])
-# 
-#         selected_of = candidates.pop()
-#         of_in_received[location].remove(selected_of)
-#         self.precursors[i].add(selected_of)
-#         
-#         internal_buffer_read[(tag, i.actions)].add(i)
-#       
-#       
-#       if i.type == EventType.TracePacketBufferError:
-#         location = (i.dpid)
-#         tag = (i.dpid, i.in_port, i.packet)
-#         
-#         candidates = filter(lambda x: x.buffer_id == i.buffer_id and x.actions == i.actions, of_in_received[location])
-# 
-#         selected = candidates.pop()
-#         of_in_received[location].remove(selected)
-#         self.precursors[i].add(selected)
-#       
-#       
-#       if i.type == EventType.TracePacketBufferWritePacket:
-#         location = (i.dpid)
-#         tag = (i.dpid, i.in_port, i.packet)
-#         
-#         try:
-#           selected = dp_in_resubmitted[tag].pop()
-#           self.precursors[i].add(selected)
-#         except KeyError:
-#           # nothing was resubmitted
-#           selected = dp_in_forwarded[tag].pop()
-#           self.precursors[i].add(selected)
-#         
-#         internal_buffer_write[(tag, i.buffer_id)].add(i)
-#       
-#       if i.type == EventType.TracePacketBufferFlushPacket:
-#         begin_event = events[i.precursor_id]
-#         self.precursors[i].add(begin_event)
