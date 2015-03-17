@@ -18,7 +18,7 @@ import pprint
 # For type hints/annotations see: http://pydev.org/manual_adv_type_hints.html
 
 #
-# TODO JM: Add support for out_port matching for DELETE and DELETE_STRICT?
+# TODO(jm): Add support for out_port matching for DELETE and DELETE_STRICT?
 #
 
 # This enum adapted from: http://stackoverflow.com/a/1695250/202504
@@ -28,11 +28,11 @@ def enum(*sequential, **named):
     key_names = reverse
     @classmethod
     def keys(cls):
-       return key_names
+      return key_names
     enums['keys'] = keys
     @classmethod
     def values(cls):
-       return enums
+      return enums
     enums['values'] = values
     return type('Enum', (), enums)
 
@@ -250,13 +250,13 @@ class CommutativityTestSuite(object):
         total = total * len(self.initials)
         
         print 'Running a total of {0} testcases.'.format(total)
-        debug_cases = None #[6] #[116] # TODO JM: Debug code, remove
+        debug_cases = None #[6] #[116] # TODO(jm): Debug code, remove
         for i in self.initials:
             for a,b in valid_perms:
                 # (n+r-1)! / r! / (n-1)!, with r=2
                 # (n+1)! / 2 / (n-1)! = 1/2 * n(n+1)
                 caseno += 1
-                if debug_cases is None or caseno in debug_cases: # TODO JM: Debug code, remove
+                if debug_cases is None or caseno in debug_cases: # TODO(jm): Debug code, remove
                     print str(caseno) + '/' +str(total) + ':',
                     tc = CommutativityTestCase(self.switch,a,b,i)
                     testcases.append(tc)
@@ -530,8 +530,8 @@ class CommutativityPredictor(object):
                       Ar_added in Dr_deleted
                       ) or (
                       Ak_is_subset_of_Dk
-                      # TODO JM: Do (out_port) is NOT handled
-                      # TODO JM: is_strict is NOT handled
+                      # TODO(jm): Do (out_port) is NOT handled
+                      # TODO(jm): is_strict is NOT handled
                       )
               
             case1 = _add_delete(x_retvals[0], y_retvals[0])
@@ -596,8 +596,8 @@ class CommutativityPredictor(object):
               Mr_before_to_after = Mr[1]
               Mr_after_to_before = Mr[2]
               
-              # TODO JM: Do (out_port) is NOT handled
-              # TODO JM: is_strict is NOT handled
+              # TODO(jm): Do (out_port) is NOT handled
+              # TODO(jm): is_strict is NOT handled
               
               return True
               
@@ -636,13 +636,13 @@ class CommutativityPredictor(object):
               Mr2_after_to_before = Mr2[2]
               
               if Mr_before_to_after is None:
-                Mr_before_to_after = []
+                Mr_before_to_after = {}
               if Mr_after_to_before is None:
-                Mr_after_to_before = []
+                Mr_after_to_before = {}
               if Mr2_before_to_after is None:
-                Mr2_before_to_after = []
+                Mr2_before_to_after = {}
               if Mr2_after_to_before is None:
-                Mr2_after_to_before = []
+                Mr2_after_to_before = {}
                 
               before1 = set(Mr_before_to_after.keys()) 
               before2 = set(Mr2_before_to_after.keys())
