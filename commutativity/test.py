@@ -17,10 +17,6 @@ import pprint
 
 # For type hints/annotations see: http://pydev.org/manual_adv_type_hints.html
 
-#
-# TODO(jm): Add support for out_port matching for DELETE and DELETE_STRICT?
-#
-
 # This enum adapted from: http://stackoverflow.com/a/1695250/202504
 def enum(*sequential, **named):
     enums = dict(zip(sequential, range(len(sequential))), **named)
