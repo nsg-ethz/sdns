@@ -63,7 +63,8 @@ class MainApp(object):
         sw2.executeCommand(Command(Cmd.RESET))
 
         comparator = FlowComparator(sw2)
-
+        sdnracer_comm_checker = SdnRacerCommutativityChecker(comparator)
+        
         testcases = []
 
         # Some regular testcases to test the program:
@@ -208,7 +209,7 @@ class MainApp(object):
             [Command(Cmd.OF_ADD,FlowDescription('table=0, priority=0, tcp, actions=drop')),Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.0/24 actions=output:8'))],
             [Command(Cmd.OF_ADD,FlowDescription('table=0, priority=0, tcp, actions=drop')),Command(Cmd.OF_ADD,FlowDescription('table=0, priority=5, tcp,nw_dst=10.0.0.1 actions=output:9'))],
         ]
-        suite = CommutativityTestSuite(sw,comparator,command_list,initials_list)
+        suite = CommutativityTestSuite(sw,comparator,sdnracer_comm_checker,command_list,initials_list)
         suite.evaluate_all()
 
 
@@ -216,20 +217,20 @@ class CommutativityTestSuite(object):
     """
     Given a list of commands and a list of initial commands, generate testcases for all possible combinations
     """
-    def __init__(self,switch,comparator,commands,initials=None):
+    def __init__(self,switch,comparator,comm_checker,commands,initials=None):
         self.switch = switch
         self.comparator = comparator
+        self.comm_checker = comm_checker
         self.commands = commands
         if commands == None:
             commands = []
         self.initials = initials
         if initials == None:
             initials = [[]]
-        self.predictor = CommutativityPredictor(self.switch,self.comparator)
+        self.predictor = CommutativityPredictor(self.switch,self.comparator, self.comm_checker)
 
     def evaluate_all(self):
         testcases = []
-        total_permutations = len(self.commands)*(len(self.commands)+1)/2*len(self.initials)
         caseno = 0
         passed = 0
         failed_imprecise = 0
@@ -242,7 +243,7 @@ class CommutativityTestSuite(object):
         valid_types = [Cmd.TRACE, Cmd.OF_ADD, Cmd.OF_DEL, Cmd.OF_MOD]
         
         valid_perms = []
-        for i in itertools.combinations_with_replacement(self.commands,2):
+        for i in itertools.permutations(self.commands,2): # both orderings: AB, BA!
           if i[0].type in valid_types and i[1].type in valid_types:
             total += 1
             valid_perms.append(i)
@@ -250,11 +251,9 @@ class CommutativityTestSuite(object):
         total = total * len(self.initials)
         
         print 'Running a total of {0} testcases.'.format(total)
-        debug_cases = None #[6] #[116] # TODO(jm): Debug code, remove
+        debug_cases = [1] #[257] #[116] # TODO(jm): Debug code, remove
         for i in self.initials:
             for a,b in valid_perms:
-                # (n+r-1)! / r! / (n-1)!, with r=2
-                # (n+1)! / 2 / (n-1)! = 1/2 * n(n+1)
                 caseno += 1
                 if debug_cases is None or caseno in debug_cases: # TODO(jm): Debug code, remove
                     print str(caseno) + '/' +str(total) + ':',
@@ -262,13 +261,9 @@ class CommutativityTestSuite(object):
                     testcases.append(tc)
                     tc.expected = self.predictor.predict(tc)
                     if tc.expected is None:
-                      if self.predictor.last_none_was_mod_as_add:
-                        print 'Skipped MOD behaving as an ADD'
-                        skipped += 1
-                      else:
-                        print 'Skipped (N/A)'
-                        print tc
-                        na += 1
+                      print 'Skipped (N/A)'
+                      print tc
+                      na += 1
                       continue
                     result,info_str = tc.evaluate()
                     tc.result = result
@@ -276,403 +271,144 @@ class CommutativityTestSuite(object):
                     if result is True:
                         passed += 1
                         print 'Pass. ' + info_str
+#                         print str(tc)
                     elif result is False:
                         failed += 1
                         if tc.expected == False:
                             # it commuted although we did not expect it to
                             failed_imprecise += 1
                             print 'Fail (impreciseness). ' + info_str
-                            print str(tc)
+#                             print str(tc)
                         else:
                             failed_unsound += 1
-                            print 'Fail (unsoundness). ' + info_str
+                            print 'Fail (unsoundness! Invalid rules!). ' + info_str
                             print str(tc)
                     else:
                         na += 1
                         print 'N/A. ' + info_str
                         print str(tc)
         print 'Passed: {0}, Failed: {1} (imprecise: {2}, unsound: {3}), Skipped: {4}, N/A: {5}, Total testcases: {6}'.format(passed,failed,failed_imprecise,failed_unsound,skipped,na,total)
+        print 'Note: Test failures due to impreciseness are expected and not a problem. This means that our commutativity checker predicted that a testcase would not commute, but it actually did when simulated. This is not a guarantee that the pair of rules would commute in every scenario, just that they did for the initial state given in the testcase.'
+        print 'Note: Test failures due to unsoundness (predicted that the testcase commutes but it actually does not) are a major problem and the count should be 0.'
         print 'Done!'
 
 
 class CommutativityPredictor(object):
-    def __init__(self,switch,comparator):
+    def __init__(self,switch,comparator, comm_checker):
         """Create object
         :type switch: OvsSwitch
         :type comparator : FlowComparator
         """
         self.switch = switch
         self.comparator = comparator
-        self.last_none_was_mod_as_add = False
+        self.comm_checker = comm_checker
 
     def predict(self,testcase):
         """Apply commutativity rules
         :type testcase: CommutativityTestCase
         """
-        self.last_none_was_mod_as_add = False
         testcase.simulate()
         initial = testcase.initial
         
-        # order by enum to reduce number of cases
-        x = testcase.a
-        y = testcase.b
-        ': :type x: Command'
-        ': :type y: Command'
+        a = testcase.a
+        b = testcase.b
+        ': :type a: Command'
+        ': :type b: Command'
         
-        xy_x = testcase.first_a
-        xy_y = testcase.first_b
-        xy_dump = testcase.first_dump
-        yx_x = testcase.second_a
-        yx_y = testcase.second_b
-        yx_dump = testcase.second_dump
-        ': :type xy_x: CommandResult'
-        ': :type xy_y: CommandResult'
-        ': :type xy_dump: CommandResult'
-        ': :type yx_x: CommandResult'
-        ': :type yx_y: CommandResult'
-        ': :type yx_dump: CommandResult'
+        state_a_executed = testcase.state_a_executed
+        state_ab_executed = testcase.state_ab_executed
+        dump_ab_done = testcase.dump_ab_done
+        ': :type state_a_executed: CommandResult'
+        ': :type state_ab_executed: CommandResult'
+        ': :type dump_ab_done: CommandResult'
         
-        if testcase.a.type > testcase.b.type or (
-                                       testcase.a == testcase.b and 
-                                       hasattr(testcase.b, 'strict') and testcase.b.strict and 
-                                       hasattr(testcase.a, 'strict') and not testcase.a.strict):
-            x = testcase.b
-            y = testcase.a
-            yx_y = testcase.first_a
-            yx_x = testcase.first_b
-            yx_dump = testcase.first_dump
-            xy_y = testcase.second_a
-            xy_x = testcase.second_b
-            xy_dump = testcase.second_dump
-        
-        # add return values to results
-        all_results = set()
-        all_results.add(xy_x)
-        all_results.add(xy_y)
-        all_results.add(yx_x)
-        all_results.add(yx_y)
 
         # store all logical return values so we don't need to calculate them more than once
-        for r in all_results:
-            r.update_return_value(self.comparator)
+        state_a_executed.update_return_value(self.comparator)
+        state_ab_executed.update_return_value(self.comparator)
         
         # General tactic
         # --------------
-        # - Determine conflicts for both orders A->B and B->A
-        #   - In each those orders determine conflict for both commands:
+        # - Determine conflicts for order A->B (do not check B->A, we have a separate testcase for that)
+        #   - Determine conflict for both commands:
         #     - Reorder first after second
         #     - Reorder second before first
         #
-        # - Combine formulas with ORs (4 clauses)
+        # - Combine formulas with ORs (4 clauses), minimize formula -> you get the formula that the checker uses
         #
         # Terminology
         # -----------
         #  p=priority, k=key/match, a=actions, r=return value
         #
                
-        if x.type in (Cmd.RESET, Cmd.CLEAR) or y.type in (Cmd.RESET, Cmd.CLEAR):
+        if a.type in (Cmd.RESET, Cmd.CLEAR) or b.type in (Cmd.RESET, Cmd.CLEAR):
             print "Unsupported case!"
             assert False # not supported!!
             return None # not supported!!
           
-        x_retvals = [xy_x.retval, yx_x.retval]
-        y_retvals = [xy_y.retval, yx_y.retval]
+#           if x.type == Cmd.TRACE:
+#             # x is TRACE
+#             trace = x
+#             Tpka = trace.flowdesc
+#             Tp = trace.flowdesc.get_priority()
+#             Tk = trace.flowdesc.get_match()
+#             Ta = trace.flowdesc.get_actions()
+#          
+#             if y.type == Cmd.OF_ADD:
+#                 # y is ADD
+#                 add = y
+#                 Apka = add.flowdesc
+#                 Ap = add.flowdesc.get_priority()
+#                 Ak = add.flowdesc.get_match()
+#                 Aa = add.flowdesc.get_actions()
+#                  
+#                 # To be a valid specification, the rule has to produce the same output for each case. In reality,
+#                 # only one of the cases will be available for checking.
+#                 case1 = _trace_add(x_retvals[0], y_retvals[0])
+#                 case2 = _trace_add(x_retvals[1], y_retvals[1])
+#                 assert case1 == case2
+#                 return not case1
         
-        if x.type == Cmd.TRACE:
-            # x is TRACE
-            trace = x
-            Tpka = trace.flowdesc
-            Tp = trace.flowdesc.get_priority()
-            Tk = trace.flowdesc.get_match()
-            Ta = trace.flowdesc.get_actions()
+        if a.type == Cmd.TRACE and b.type == Cmd.TRACE: # r/r
+          return True
         
-            if y.type == Cmd.TRACE:
-                return True #always commutes
+        if a.type == Cmd.TRACE and b.type in (Cmd.OF_ADD, Cmd.OF_DEL, Cmd.OF_MOD): # r/w
+          pkt_match = a.flowdesc # the read
+          pkt_match.type = a.type # inject type field as comm checker needs it.
+          pkt_match.strict = a.strict # inject type field as comm checker needs it.
+          i_retval = state_a_executed.retval # the used rule
+          k_fm = b.flowdesc # the write
+          k_fm.type = b.type # inject type field as comm checker needs it.
+          k_fm.strict = b.strict # inject type field as comm checker needs it.
+          i_eid = 1 # read_id
+          k_eid = 2 # order: k (the write) is executed after i
+          return self.comm_checker.check_comm_spec_rw(pkt_match, i_retval, k_fm, i_eid, k_eid)
         
-            if y.type == Cmd.OF_ADD:
-                # y is ADD
-                add = y
-                Apka = add.flowdesc
-                Ap = add.flowdesc.get_priority()
-                Ak = add.flowdesc.get_match()
-                Aa = add.flowdesc.get_actions()
-                
-                def _trace_add(Tr,Ar):
-                  Tr_read = Tr
-                  Ar_added = Ar[0]
-                  Ar_before_matches = Ar[1]
-                  # is the TRACE key a subset of the ADD key?
-                  Tk_is_subset_of_Ak = self.comparator.is_subset(Tk,Ak)
-                  # which rule would TRACE use from the overridden/hidden rules
-                  select_Tk_from_Ar = self.comparator.select(Tk,Ar_before_matches)
-                  
-                  
-                  return (
-                          Tr_read not in Ar_added and
-                          Tk_is_subset_of_Ak and
-                          Ap >= Tr.get_priority() and
-                          Aa != Tr.get_actions()
-                          ) or (
-                          Tr_read in Ar_added and 
-                          select_Tk_from_Ar.get_actions() != Tr_read.get_actions()
-                          )
-                  
-                # To be a valid specification, the rule has to produce the same output for each case. In reality,
-                # only one of the cases will be available for checking.
-                case1 = _trace_add(x_retvals[0], y_retvals[0])
-                case2 = _trace_add(x_retvals[1], y_retvals[1])
-                assert case1 == case2
-                return not case1
-              
-            if y.type == Cmd.OF_DEL:
-                # y is DEL
-                delete = y
-                Dpka = delete.flowdesc
-                Dp = delete.flowdesc.get_priority()
-                Dk = delete.flowdesc.get_match()
-                Da = delete.flowdesc.get_actions()
-                
-                def _trace_delete(Tr,Dr):
-                  Tr_read = Tr
-                  Dr_deleted = Dr[0]
-                  Dr_aftermatches = Dr[1]
-                  
-                  select_Tk_Dr_aftermatches = self.comparator.select(Tk, Dr_aftermatches)                 
-                  select_Tk_Dr_deleted = self.comparator.select(Tk, Dr_deleted)                 
-                  
-                  return (
-                          Tr_read in Dr_deleted and
-                          select_Tk_Dr_aftermatches.get_actions() != Tr.get_actions()
-                          ) or (
-                          Tr_read not in Dr_deleted and 
-                          select_Tk_Dr_deleted.get_priority() >= Tr_read.get_priority() and
-                          select_Tk_Dr_deleted.get_actions() != Tr_read.get_actions()
-                          )
-                  
-                case1 = _trace_delete(x_retvals[0], y_retvals[0])
-                case2 = _trace_delete(x_retvals[1], y_retvals[1])
-                assert case1 == case2
-                return not case1
-              
-            if y.type == Cmd.OF_MOD:
-                # y is MOD
-                modify = y
-                Mpka = modify.flowdesc
-                Mp = modify.flowdesc.get_priority()
-                Mk = modify.flowdesc.get_match()
-                Ma = modify.flowdesc.get_actions()
-                
-                def _trace_modify(Tr,Mr):
-                  Tr_read = Tr
-                  is_add = Mr[0]
-                  if is_add:
-                    # uninteresting case, same as an add
-                    return None # not supported!! TODO: handle this better
-                  Mr_before_to_after = Mr[1]
-                  Mr_after_to_before = Mr[2]
-                  
-                  return (
-                          Tr_read in Mr_before_to_after is not None and Tr_read in Mr_before_to_after.keys() and
-                          Mr_before_to_after[Tr_read].get_actions() != Tr_read.get_actions()
-                          ) or (
-                           Tr_read in Mr_after_to_before is not None and Tr_read not in Mr_after_to_before.keys() and 
-                          Mr_after_to_before[Tr_read].get_actions() != Tr_read.get_actions()
-                          )
-                  
-                case1 = _trace_modify(x_retvals[0], y_retvals[0])
-                case2 = _trace_modify(x_retvals[1], y_retvals[1])
-                if case1 is None or case2 is None:
-                  self.last_none_was_mod_as_add = True
-                  return None
-                assert case1 == case2
-                return not case1      
-              
-        if x.type == Cmd.OF_ADD:
-          # x is ADD
-          add = x
-          Apka = add.flowdesc
-          Ap = add.flowdesc.get_priority()
-          Ak = add.flowdesc.get_match()
-          Aa = add.flowdesc.get_actions()
-      
-          if y.type == Cmd.OF_ADD:
-            add2 = x
-            A2pka = add2.flowdesc
-            A2p = add2.flowdesc.get_priority()
-            A2k = add2.flowdesc.get_match()
-            A2a = add2.flowdesc.get_actions()
-            
-            
-            def _add_add(A1r,A2r):
-              is_overwrite = A1r[2] or A2r[2]
-              return not is_overwrite and Ap == A2p and Ak == A2k and Aa != A2a
-          
-            case1 = _add_add(x_retvals[0], y_retvals[0])
-            return not case1
-            
-          if y.type == Cmd.OF_DEL:
-            delete = y
-            Dpka = delete.flowdesc
-            Dp = delete.flowdesc.get_priority()
-            Dk = delete.flowdesc.get_match()
-            Da = delete.flowdesc.get_actions()
-            
-            def _add_delete(Ar,Dr):
-              Ar_added = Ar[0]
-              
-              Ar_before_matches = Ar[1]
-              Dr_deleted = Dr[0]
-              Dr_aftermatches = Dr[1]
-              
-              Ak_is_subset_of_Dk = self.comparator.is_subset(Ak,Dk)
-              
-              return (
-                      Ar_added in Dr_deleted
-                      ) or (
-                      Ak_is_subset_of_Dk
-                      # TODO(jm): Do (out_port) is NOT handled
-                      # TODO(jm): is_strict is NOT handled
-                      )
-              
-            case1 = _add_delete(x_retvals[0], y_retvals[0])
-            case2 = _add_delete(x_retvals[1], y_retvals[1])
-            assert case1 == case2
-            return not case1
-          
-          if y.type == Cmd.OF_MOD:
-            # y is MOD
-            modify = y
-            Mpka = modify.flowdesc
-            Mp = modify.flowdesc.get_priority()
-            Mk = modify.flowdesc.get_match()
-            Ma = modify.flowdesc.get_actions()
-            
-            def _add_modify(Ar,Mr):
-              Ar_added = Ar[0]
-              Ar_before_matches = Ar[1]
-              
-              is_add = Mr[0]
-              if is_add:
-                # uninteresting case, same as an add
-                return None # not supported!! TODO: handle this better
-              Mr_before_to_after = Mr[1]
-              Mr_after_to_before = Mr[2]
-              
-              return (
-                       Mr_before_to_after is not None and Ar_added in Mr_before_to_after.keys() and
-                      Mr_before_to_after[Ar_added].get_actions() != Ar_added.get_actions()
-                      ) or (
-                       Mr_after_to_before is not None and Ar_added not in Mr_after_to_before.keys() and 
-                      Mr_after_to_before[Ar_added].get_actions() != Ar_added.get_actions()
-                      )
-              
-            case1 = _add_modify(x_retvals[0], y_retvals[0])
-            case2 = _add_modify(x_retvals[1], y_retvals[1])
-            if case1 is None or case2 is None:
-              self.last_none_was_mod_as_add = True
-              return None
-            assert case1 == case2
-            return not case1   
-              
-        if x.type == Cmd.OF_DEL:
-          if y.type == Cmd.OF_DEL:
-            return True
-          
-          if y.type == Cmd.OF_MOD:
-            # y is MOD
-            modify = y
-            Mpka = modify.flowdesc
-            Mp = modify.flowdesc.get_priority()
-            Mk = modify.flowdesc.get_match()
-            Ma = modify.flowdesc.get_actions()
-            
-            def _del_modify(Dr,Mr):
-              Dr_deleted = Dr[0]
-              Dr_aftermatches = Dr[1]
-              is_add = Mr[0]
-              if is_add:
-                # uninteresting case, same as an add
-                return None # not supported!! TODO: handle this better
-              Mr_before_to_after = Mr[1]
-              Mr_after_to_before = Mr[2]
-              
-              # TODO(jm): Do (out_port) is NOT handled
-              # TODO(jm): is_strict is NOT handled
-              
-              return True
-              
-            case1 = _del_modify(x_retvals[0], y_retvals[0])
-            case2 = _del_modify(x_retvals[1], y_retvals[1])
-            if case1 is None or case2 is None:
-              self.last_none_was_mod_as_add = True
-              return None
-            assert case1 == case2
-            return not case1
-          
-        if x.type == Cmd.OF_MOD:
-          # x is MOD
-          modify = x
-          Mpka = modify.flowdesc
-          Mp = modify.flowdesc.get_priority()
-          Mk = modify.flowdesc.get_match()
-          Ma = modify.flowdesc.get_actions()
-          if y.type == Cmd.OF_MOD:
-            # y is MOD
-            modify2 = y
-            M2pka = modify2.flowdesc
-            M2p = modify2.flowdesc.get_priority()
-            M2k = modify2.flowdesc.get_match()
-            M2a = modify2.flowdesc.get_actions()
-            
-            def _modify_modify(Mr,Mr2):
-              is_add = Mr[0]
-              is_add2 = Mr2[0]
-              if is_add or is_add2:
-                # uninteresting case, same as an add
-                return None # not supported!! TODO: handle this better
-              Mr_before_to_after = Mr[1]
-              Mr_after_to_before = Mr[2]
-              Mr2_before_to_after = Mr2[1]
-              Mr2_after_to_before = Mr2[2]
-              
-              if Mr_before_to_after is None:
-                Mr_before_to_after = {}
-              if Mr_after_to_before is None:
-                Mr_after_to_before = {}
-              if Mr2_before_to_after is None:
-                Mr2_before_to_after = {}
-              if Mr2_after_to_before is None:
-                Mr2_after_to_before = {}
-                
-              before1 = set(Mr_before_to_after.keys()) 
-              before2 = set(Mr2_before_to_after.keys())
-              after1 = set(Mr_after_to_before.keys())
-              after2 = set(Mr2_after_to_before.keys())
-              
-              if len(after1.intersection(before2)) > 0:
-                return False
-              if len(after2.intersection(before1)) > 0:
-                return False
-              return True
-              
-            case1 = _modify_modify(x_retvals[0], y_retvals[0])
-            case2 = _modify_modify(x_retvals[1], y_retvals[1])
-            if case1 is None or case2 is None:
-              self.last_none_was_mod_as_add = True
-              return None
-            assert case1 == case2
-            return not case1
+        if a.type in (Cmd.OF_ADD, Cmd.OF_DEL, Cmd.OF_MOD) and b.type == Cmd.TRACE: # w/r
+          pkt_match = b.flowdesc # the read
+          pkt_match.type = b.type
+          pkt_match.strict = b.strict
+          i_retval = state_ab_executed.retval # the used rule
+          k_fm = a.flowdesc # the write
+          k_fm.type = a.type
+          k_fm.strict = a.strict
+          i_eid = 2 # read_id
+          k_eid = 1 # write id
+          return self.comm_checker.check_comm_spec_rw(pkt_match, i_retval, k_fm, i_eid, k_eid)
+        
+        if a.type in (Cmd.OF_ADD, Cmd.OF_DEL, Cmd.OF_MOD) and b.type in (Cmd.OF_ADD, Cmd.OF_DEL, Cmd.OF_MOD): # w/w
+          i_fm = a.flowdesc
+          i_fm.type = a.type
+          i_fm.strict = a.strict
+          k_fm = b.flowdesc
+          k_fm.type = b.type
+          k_fm.strict = b.strict
+          return self.comm_checker.check_comm_spec_ww(i_fm, k_fm)
+        
+        print "This should never happen!"
+        assert False
+        return None
 
-        # NOTE:
-        #       with the new rule the rest of the testcases are trivial, 
-        #       as we would just do the same or similar comparison as is done in:
-        #       CommutativityTestCase.evaluate. There is nothing to gain 
-        #       as we cannot predict anything without the information in
-        #       the return values.
-        #       The remaining combinations are very similar to add_modify.
-        #
-            
-                
 class IntersectionNonEmptyTestCase(object):
     def __init__(self,comparator,a,b,expected=None):
         self.comparator = comparator
@@ -712,8 +448,8 @@ class SubsetTestCase(object):
 class CommutativityTestCase(object):
     def __init__(self,switch,a,b,initial=None,expected=None):
         self.switch = switch
-        self.a = a
-        self.b = b
+        self.a = a.copy()
+        self.b = b.copy()
         self.initial = initial
         if initial is None:
             self.initial = []
@@ -724,29 +460,31 @@ class CommutativityTestCase(object):
         """
         Execute both possible traces, store results
         """
-
+        
+        self.switch.executeCommand(Command(Cmd.CLEAR))
         if not self._simulate_done:
-            self.switch.executeCommand(Command(Cmd.CLEAR))
-            for cmd in self.initial:
-                self.switch.executeCommand(cmd)
-    
             # print "Running a->b"
-            self.first_a = self.switch.executeCommand(self.a,return_affected=True)
-            self.first_b = self.switch.executeCommand(self.b,return_affected=True)
-    
-            self.first_dump = self.switch.executeCommand(Command(Cmd.DUMP,dump_removeStatistics=True))
-    
-            self.switch.executeCommand(Command(Cmd.CLEAR))
             for cmd in self.initial:
                 self.switch.executeCommand(cmd)
+            self.state_a_executed = self.switch.executeCommand(self.a,return_affected=True)
+            self.state_ab_executed = self.switch.executeCommand(self.b,return_affected=True)
+    
+            self.dump_ab_done = self.switch.executeCommand(Command(Cmd.DUMP,dump_removeStatistics=True))
+    
+            # TODO: not strictly needed anymore, as testcases have order now. However, this might be very useful for debugging if we can see the reverse order.
     
             # print "Running b->a"
-            self.second_b = self.switch.executeCommand(self.b,return_affected=True)
-            self.second_a = self.switch.executeCommand(self.a,return_affected=True)
+            self.switch.executeCommand(Command(Cmd.CLEAR))
+            for cmd in self.initial:
+                self.switch.executeCommand(cmd)
     
-            self.second_dump = self.switch.executeCommand(Command(Cmd.DUMP,dump_removeStatistics=True))
+            self.state_b_executed = self.switch.executeCommand(self.b,return_affected=True)
+            self.state_ba_executed = self.switch.executeCommand(self.a,return_affected=True)
+    
+            self.dump_ba_done = self.switch.executeCommand(Command(Cmd.DUMP,dump_removeStatistics=True))
     
             self._simulate_done = True
+        self.switch.executeCommand(Command(Cmd.CLEAR))
 
     def evaluate(self):
         """
@@ -763,26 +501,26 @@ class CommutativityTestCase(object):
 
         # Preliminary
         commutes = True
-
+        
         if self.a.type == Cmd.TRACE:
-            # compare first_a with second_a
-            if self.first_a.traced_actions != self.second_a.traced_actions:
+            # compare state_a_executed with state_ba_executed
+            if self.state_a_executed.traced_actions != self.state_ba_executed.traced_actions:
                 commutes = False
                 if self.expected != False:
-#                     print 'Actions for a not the same: '+str(self.first_a.traced_actions)+' vs. '+str(self.second_a.traced_actions)
+#                     print 'Actions for a not the same: '+str(self.state_a_executed.traced_actions)+' vs. '+str(self.state_ba_executed.traced_actions)
                     pass
 
         if self.b.type == Cmd.TRACE:
-            # compare first_b with second_b
-            if self.first_b.traced_actions != self.second_b.traced_actions:
+            # compare state_ab_executed with state_b_executed
+            if self.state_ab_executed.traced_actions != self.state_b_executed.traced_actions:
                 commutes = False
                 if self.expected != False:
-#                     print 'Actions for b not the same: '+str(self.first_b.traced_actions)+' vs. '+str(self.second_b.traced_actions)
+#                     print 'Actions for b not the same: '+str(self.state_ab_executed.traced_actions)+' vs. '+str(self.state_b_executed.traced_actions)
                     pass
                 
-        #compare first_dump to second_dump
-        first_set = set(self.first_dump.dumped_flows)
-        second_set = set(self.second_dump.dumped_flows)
+        #compare dump_ab_done to dump_ba_done
+        first_set = set(self.dump_ab_done.dumped_flows)
+        second_set = set(self.dump_ba_done.dumped_flows)
         if not first_set == second_set:
             commutes = False
             # print "Flow tables not the same"
@@ -793,8 +531,8 @@ class CommutativityTestCase(object):
 
         # print "Done with testcase"
         info_str = ('commutes.' if commutes else 'does not commute.') + ' Rules added/removed: ' \
-        '(' + '+'+str(len(self.first_a.added_flows))+'/-'+str(len(self.first_a.removed_flows))+', '+'+'+str(len(self.first_b.added_flows))+'/-'+str(len(self.first_b.removed_flows))+')' + ' vs.' \
-        '(' + '+'+str(len(self.second_a.added_flows))+'/-'+str(len(self.second_a.removed_flows))+', '+'+'+str(len(self.second_b.added_flows))+'/-'+str(len(self.second_b.removed_flows))+')'
+        '(' + '+'+str(len(self.state_a_executed.added_flows))+'/-'+str(len(self.state_a_executed.removed_flows))+', '+'+'+str(len(self.state_ab_executed.added_flows))+'/-'+str(len(self.state_ab_executed.removed_flows))+')' + ' vs.' \
+        '(' + '+'+str(len(self.state_ba_executed.added_flows))+'/-'+str(len(self.state_ba_executed.removed_flows))+', '+'+'+str(len(self.state_b_executed.added_flows))+'/-'+str(len(self.state_b_executed.removed_flows))+')'
 
         if self.expected is not None:
             if commutes == self.expected:
@@ -836,6 +574,7 @@ class FlowComparator(object):
         ': :type cmd_ret: CommandResult'
         selected_flow = FlowDescription(cmd_ret.traced_rule)
         selected_flow.set_actions(cmd_ret.traced_actions)
+        self._reset()
         return selected_flow
 
     def is_intersection_nonempty(self,s,t,use_priorities=False):
@@ -855,12 +594,24 @@ class FlowComparator(object):
             s.set_priority(5)
             t.set_priority(5)
         result_s = self.switch.executeCommand(Command(Cmd.OF_ADD,s))
+        before = self.switch.executeCommand(Command(Cmd.DUMP,dump_removeStatistics=True))
         t.fields['check_overlap'] = None #enables overlap checking (key has no value, thus None)
         result_t = self.switch.executeCommand(Command(Cmd.OF_ADD,t))
-        if result_t.overlap_error is True:
+        # Note: overlap checking does NOT work (return an error) if the flows/IPs are identical in ovs-ofctl!
+        # But if the flows are identical, then the number of flows will not have changed, as it was overwritten
+        after = self.switch.executeCommand(Command(Cmd.DUMP,dump_removeStatistics=True))
+        before_num = len(before.dumped_flows)
+        after_num = len(after.dumped_flows)
+
+        self._reset()
+        if before_num == after_num:
+            # s overwrote t, s == t
             return True
         else:
-            return False
+          if result_t.overlap_error is True:
+              return True
+          else:
+              return False
         
     def subset_set(self,s,flow_set):
         """Return all flows that are a subset of s (are more strict than s)
@@ -898,28 +649,282 @@ class FlowComparator(object):
         # is s a subset of t?
         # TODO: this can be done much faster (without simulation)
         # Note: Priorities are NOT checked here!
+        
+        self._reset()
         s_copy = s.copy()
         t_copy = t.copy()
-        self._reset()
         s_copy.actions = OrderedDict([('1',None)])
         t_copy.actions = OrderedDict([('2',None)])
         result_t = self.switch.executeCommand(Command(Cmd.OF_ADD,t_copy))
+        before_before = self.switch.executeCommand(Command(Cmd.DUMP,dump_removeStatistics=True))
         result_s = self.switch.executeCommand(Command(Cmd.OF_ADD,s_copy))
         before = self.switch.executeCommand(Command(Cmd.DUMP,dump_removeStatistics=True))
         result = self.switch.executeCommand(Command(Cmd.OF_DEL,t_copy))
         after = self.switch.executeCommand(Command(Cmd.DUMP,dump_removeStatistics=True))
+        before_before_num = len(before_before.dumped_flows)
         before_num = len(before.dumped_flows)
         after_num = len(after.dumped_flows)
+        self._reset()
 
-        if before_num == 1:
-            # s overwrote t
+        if before_before_num == before_num:
+            assert before_num == 1
+            # s overwrote t, s == t
             return True
         else:
             assert after_num == before_num-1 or after_num == before_num-2
             if after_num == before_num-2:
+                # s matches t, so both t and s were removed
                 return True
             else:
+                # s does not match t, so only t was removed
                 return False
+
+class SdnRacerCommutativityChecker(object):
+  """
+  Commutativity checking class from SDNRacer (hb_commute_check), adapted for 
+  format used here.
+  """
+  
+  def __init__(self, comparator):
+    self.comparator = comparator
+    
+  def is_flowmod_subset(self,e1,e2,strict=False):
+    """
+    Check if flow mod e1 is a subset of flow mod e2, with different semantics
+    if the strict flag is True.
+    i.e. is e2 more general?
+    """
+    if strict:
+      ## return e1.match == e2.match and e1.priority == e2.priority
+      return e1.get_match() == e2.get_match() and e1.get_priority() == e2.get_priority()
+    else:
+      ## return e2.match.matches_with_wildcards(e1.match)
+      return self.comparator.is_subset(e1,e2)
+    
+  def is_match_subset(self, m1, m2):
+    """
+    Check if match m1 is a subset of flow mod m2.
+    """
+    return self.comparator.is_subset(m1,m2)
+
+  def is_match_intersection_nonempty(self, m1, m2):
+    """
+    Check if there is a packet that can match both matches at the same time.
+
+    This is implemented as described in "Header Space Analysis: Static
+    Checking for Networks", http://dl.acm.org/citation.cfm?id=2228298.2228311
+
+    "For two headers to have a non-empty intersection, both headers must have
+    the same bit value at every position that is not a wildcard.
+
+    Note: This is not currently supported by any version of POX, see the
+          Github issue here for updates on the implementation:
+
+          https://github.com/noxrepo/pox/issues/142
+
+    """
+    ## if isinstance(m1, ofp_flow_mod) and isinstance(m2, ofp_flow_mod):
+    ##   return m1.match.check_overlap(m2.match)
+    ##     if isinstance(m1, ofp_match) and isinstance(m2, ofp_match):
+    ##       return m1.check_overlap(m2)
+    return self.comparator.is_intersection_nonempty(m1,m2)
+
+  def uses_outport(self, out_port, e):
+    """
+    Is out_port in any of the actions of e_actions?
+    """
+    ## if e.actions is not None:
+    ##   for a in e.actions:
+    ##     if hasattr(a, "type"):
+    ##       if a.type in (OFPAT_ENQUEUE, OFPAT_OUTPUT):
+    ##         if hasattr(a, "port"):
+    ##           if a.port == out_port:
+    ##             return True
+    if e.actions is not None:
+      action_list = [(k if v is None else k+''+v) for k,v in e.actions.iteritems()]
+      for entry in action_list:
+        # The following cases have out ports:
+        #   port
+        #   output:port
+        #   normal
+        #   flood
+        #   all
+        #   local
+        #   in_port
+        #   enqueue(port,queue)
+        if (str(out_port) == str(entry)) or ("output:"+str(out_port) == str(entry)) or ("enqueue("+str(out_port)+"," in str(entry)):
+          return True
+    return False
+  
+  def deletes(self, edel, e, strict=False):
+    """
+    Does edel delete e?
+
+    Note: If e is None then the answer is always False.
+
+    DELETE and DELETE STRICT commands can be optionally filtered by out-
+    put port. If the out_port field contains a value other than OFPP_NONE, it intro-
+    duces a constraint when matching. This constraint is that the rule must contain
+    an output action directed at that port. This field is ignored by ADD, MODIFY,
+    and MODIFY STRICT messages.
+    """
+    if e is None:
+      return False # TODO(jm): add documentation for this special case
+    ## if e.out_port != OFPP_NONE:
+    ##   has_outport = self.uses_outport(e.out_port, edel)
+    ##   return self.is_flowmod_subset(e, edel, strict) and has_outport
+    ## else:
+    ##   return self.is_flowmod_subset(e, edel, strict)
+    
+    if (self.uses_outport("normal", e) or 
+        self.uses_outport("flood", e) or 
+        self.uses_outport("all", e) or 
+        self.uses_outport("local", e) or 
+        self.uses_outport("in_port", e)):
+      has_outport = self.uses_outport(e.out_port, edel)
+      return self.is_flowmod_subset(e, edel, strict) and has_outport
+    else:
+      return self.is_flowmod_subset(e, edel, strict)
+
+  def is_add(self, fm):
+    return fm.type == Cmd.OF_ADD
+  def is_del(self, fm):
+    return fm.type == Cmd.OF_DEL
+  def is_mod(self, fm):
+    return fm.type == Cmd.OF_MOD
+  def is_strict(self, fm):
+    return hasattr(fm, 'strict') and fm.strict == True
+  def is_check_overlap_flag(self, fm):
+    return 'check_overlap' in fm.fields # the field (key) check_overlap will exist, value will be None
+
+  def nocommute_read_add(self, pkt, eread, eadd, read_id, add_id):
+    if add_id < read_id:
+      if eread is None:
+        return False
+      else:
+        # only compare select fields, we don't want to compare statistics
+        return (
+        eread.get_priority() == eadd.get_priority() and
+        eread.get_match() == eadd.get_match() and
+        eread.get_actions() == eadd.get_actions()
+        )
+    else:
+      if eread is None:
+        return self.is_match_subset(pkt, eadd.get_match())
+      else:
+        return self.is_match_subset(pkt, eadd.get_match()) and eread.get_priority() <= eadd.get_priority() and eread.get_actions() != eadd.get_actions()
+
+  def nocommute_read_mod(self, pkt, eread, emod, read_id, mod_id):
+    if mod_id < read_id:
+      if eread is None:
+        return False
+      else:
+        return self.is_flowmod_subset(eread, emod, self.is_strict(emod)) and eread.get_actions() == emod.get_actions()
+    else:
+      if eread is None:
+        return False
+      else:
+        return self.is_match_subset(pkt, emod.get_match()) and eread.get_actions() != emod.get_actions()
+
+  def nocommute_read_del(self, pkt, eread, edel, read_id, del_id):
+    if del_id < read_id:
+      return self.is_match_subset(pkt, edel.get_match())
+    else:
+      return self.deletes(edel,eread,self.is_strict(edel)) # False if eread is None
+
+  def nocommute_del_mod(self, edel, emod):
+    if self.is_strict(emod):
+      return self.deletes(edel, emod, True)
+    else:
+      return self.is_match_intersection_nonempty(edel.get_match(), emod.get_match())
+
+  def nocommute_add_del(self, eadd, edel):
+    return (
+            self.deletes(edel, eadd, self.is_strict(edel)) or
+            (self.is_check_overlap_flag(eadd) and self.is_match_intersection_nonempty(eadd, edel))
+            )
+
+  def nocommute_mod_mod(self, e1, e2):
+    strict1 = self.is_strict(e1)
+    strict2 = self.is_strict(e2)
+    if not strict1 and not strict2:
+      return (self.is_match_intersection_nonempty(e1, e2) and
+              e1.actions != e2.actions
+              )
+    if strict1 and strict2:
+      return (e1.get_match() == e2.get_match() and
+              e1.get_priority() == e2.get_priority() and
+              e1.get_actions() != e2.get_actions()
+              )
+    return ((self.is_flowmod_subset(e1, e2, strict2) or self.is_flowmod_subset(e2, e1, strict1)) and
+            e1.get_actions() != e2.get_actions()
+            )
+
+  def nocommute_add_mod(self, eadd, emod):
+    if not self.is_check_overlap_flag(eadd):
+      return self.is_flowmod_subset(eadd, emod, self.is_strict(emod)) and eadd.get_actions() != emod.get_actions()
+    else:
+      return self.is_match_intersection_nonempty(eadd, emod)
+
+  def nocommute_add_add(self, e1, e2, no_overlap1=False, no_overlap2=False):
+    if no_overlap1 or no_overlap2:
+      return self.is_match_intersection_empty(e1,e2) and e1.get_priority() == e2.get_priority()
+    else:
+      return e1.get_match() == e2.get_match() and e1.get_priority() == e2.get_priority() and e1.get_actions() != e2.get_actions()
+
+  def check_comm_spec_ww(self, i_fm, k_fm):
+
+    # del mod
+    if self.is_del(i_fm) and self.is_mod(k_fm):
+      return not self.nocommute_del_mod(i_fm, k_fm)
+    if self.is_mod(i_fm) and self.is_del(k_fm):
+      return not self.nocommute_del_mod(k_fm, i_fm)
+
+    # add del
+    if self.is_add(i_fm) and self.is_del(k_fm):
+      return not self.nocommute_add_del(i_fm, k_fm)
+    if self.is_del(i_fm) and self.is_add(k_fm):
+      return not self.nocommute_add_del(k_fm, i_fm)
+
+    # mod mod
+    if self.is_mod(i_fm) and self.is_mod(k_fm):
+      return not self.nocommute_mod_mod(i_fm, k_fm)
+
+    # add mod
+    if self.is_add(i_fm) and self.is_mod(k_fm):
+      return not self.nocommute_add_mod(i_fm, k_fm)
+    if self.is_mod(i_fm) and self.is_add(k_fm):
+      return not self.nocommute_add_mod(k_fm, i_fm)
+
+    # add add
+    if self.is_add(i_fm) and self.is_add(k_fm):
+      return not self.nocommute_add_add(i_fm, k_fm)
+
+    # del del
+    if self.is_del(i_fm) and self.is_del(k_fm):
+      return True # always commutes!
+
+    print "Warning: Unhandled w/w commutativity case!"
+    assert False
+
+  def check_comm_spec_rw(self, pkt_match, i_retval, k_fm, i_eid, k_eid):
+    
+    # i_retval may be None
+
+    # add
+    if self.is_add(k_fm):
+      return not self.nocommute_read_add(pkt_match, i_retval, k_fm, i_eid, k_eid)
+
+    # del
+    if self.is_del(k_fm):
+      return not self.nocommute_read_del(pkt_match, i_retval, k_fm, i_eid, k_eid)
+
+    # mod
+    if self.is_mod(k_fm):
+      return not self.nocommute_read_mod(pkt_match, i_retval, k_fm, i_eid, k_eid)
+
+    print "Warning: Unhandled r/w commutativity case!"
+    assert False
 
 class SwitchDesc(object):
     def __init__(self,name,ports):
@@ -941,6 +946,12 @@ class Command(object):
 
     def __str__(self):
         return '[' + str(Cmd.keys()[self.type]) + ', ' + str(self.flowdesc) + ((', strict=' + str(self.strict)) if self.strict else '') + ((', dump_removeStatistics=' + str(self.dump_removeStatistics)) if self.dump_removeStatistics else '') + ']'
+
+    def copy(self):
+        if self.flowdesc is None:
+          return Command(self.type, None, self.strict, self.dump_removeStatistics)
+        else:
+          return Command(self.type, self.flowdesc.copy(), self.strict, self.dump_removeStatistics)
 
 class CommandResult(object):
     def __init__(self,cmd):
@@ -1008,66 +1019,14 @@ class CommandResult(object):
         return self.before_set
     def _retval_of_add(self,comparator):
         ': :type comparator: FlowComparator'
-        # Return all rules in the flow table that are a superset of s, if none of
-        # them have higher priority than s. (If any of them had higher priority,
-        # then the added rule would not make any kind of difference.
-        s = FlowDescription(str(self.cmd.flowdesc))
-        s_prio = s.get_priority()
-        s.remove_statistics()
-        s.remove_priority()
-        s.remove_actions()
-        superset_flows = comparator.superset_set(s, self.before_set)
-        for t in superset_flows:
-            t_prio = t.get_priority()
-            if t_prio > s_prio:
-                superset_flows = set() # superset_flows will never be used
-                break
-        for x in self.added_flows:
-          x.remove_statistics()
-        for x in superset_flows:
-          x.remove_statistics()
-        is_overwrite = False
-        if self.overwritten_flows is not None and len(self.overwritten_flows) > 0:
-          is_overwrite = True
-        return (self.added_flows, superset_flows, is_overwrite)
+        return None # removed as unneeded
 
     def _retval_of_del(self,comparator):
-        # Return all rules that were removed by the deletion.
-        # Also return the superset to be more precise
-        s = FlowDescription(str(self.cmd.flowdesc))
-        s.remove_statistics()
-        s.remove_priority()
-        s.remove_actions()
-        superset_flows = comparator.superset_set(s, self.before_set)
-        superset_flows = superset_flows.difference(self.removed_flows)
-        for t in superset_flows:
-            t_prio = t.get_priority()
-            for v in self.removed_flows:
-              v_prio = v.get_priority()
-              if t_prio > v_prio:
-                superset_flows = set() # superset_flows will never be used
-                break
-        for x in self.removed_flows:
-          x.remove_statistics()
-        for x in superset_flows:
-          x.remove_statistics()
-        return (self.removed_flows, superset_flows)
+        return None # removed as unneeded
+      
     def _retval_of_mod(self,comparator):
-        # MODIFY works as ADD if there is nothing to modify
-        is_add = False
-        if len(self.added_flows) > 0:
-          is_add = True 
-        if is_add:
-          add_retvals = self._retval_of_add(comparator) 
-          return (is_add, add_retvals)
-        else:
-          if self.before_to_after is not None:
-            for x in self.before_to_after.keys():
-              x.remove_statistics()
-          if self.after_to_before is not None:
-            for x in self.after_to_before.keys():
-              x.remove_statistics()
-          return (is_add, self.before_to_after, self.after_to_before)
+        return None # removed as unneeded
+      
     def _retval_of_bar(self,comparator):
         # No return value
         return None
@@ -1150,6 +1109,8 @@ class OvsSwitch(object):
 
     def _clear(self,cmd):
         run_cmdline_string('ovs-ofctl del-flows '+self.switchdesc.name)
+        lines = run_cmdline_string('ovs-ofctl dump-flows '+self.switchdesc.name)
+        assert len(lines) == 1;
         return CommandResult(cmd)
 
     def _trace(self,cmd):
@@ -1208,11 +1169,19 @@ class OvsSwitch(object):
     def _of_del(self,cmd):
         f = FlowDescription(str(cmd.flowdesc))
         f.actions = None
+        had_check_overlap_field = False
+        if 'check_overlap' in f.fields:
+          had_check_overlap_field = True
+          # remove for ovs-ofctl
+          f.remove_check_overlap()
         if cmd.strict:
             run_cmdline_string('ovs-ofctl --strict del-flows '+self.switchdesc.name+' "'+str(cmd.flowdesc)+'"')
         else:
             f.remove_priority()
             run_cmdline_string('ovs-ofctl del-flows '+self.switchdesc.name+' "'+str(f)+'"')
+        if had_check_overlap_field == True:
+          # restore
+          f.fields['check_overlap'] = None # no value, but it exists
         return CommandResult(cmd)
 
     def _of_mod(self,cmd):
