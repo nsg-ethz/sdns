@@ -247,7 +247,7 @@ class CommutativityTestSuite(object):
         total = total * len(self.initials)
         
         print 'Running a total of {0} testcases.'.format(total)
-        debug_cases = [1] #[257] #[116] # TODO(jm): Debug code, remove
+        debug_cases = None #[1] #[257] #[116] # TODO(jm): Debug code, remove
         for i in self.initials:
             for a,b in valid_perms:
                 caseno += 1
